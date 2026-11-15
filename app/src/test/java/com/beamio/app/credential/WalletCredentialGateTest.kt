@@ -106,13 +106,18 @@ class WalletCredentialGateTest {
         assertEquals(WalletCredentialGate.BAD_REQUEST, noReqId.error); assertNull(noReqId.reqId)
     }
 
+    /** r3os: source/frame mismatch (incl. the JS-interface path) -> origin_refused first; bundle/capability -> not_trusted. */
     @Test
-    fun untrustedIsNotTrustedBeforeAnyOtherCheck() {
+    fun untrustedIsRefusedBeforeAnyOtherCheck() {
         for (v in Verdict.values().filter { it != Verdict.TRUSTED }) {
+            val expected = if (v in WalletCredentialGate.SOURCE_REFUSALS) "origin_refused" else WalletCredentialGate.NOT_TRUSTED
             for (r in listOf(req(), req("mnemonic" to words), req("extra" to 1))) {
-                assertEquals("$v $r", WalletCredentialGate.NOT_TRUSTED, (WalletCredentialGate.checkRequest(r, v) as RequestCheck.Refuse).error)
+                assertEquals("$v $r", expected, (WalletCredentialGate.checkRequest(r, v) as RequestCheck.Refuse).error)
             }
         }
+        val badId = WalletCredentialGate.checkRequest(JSONObject().put("type", "walletCredential").put("reqId", -1), Verdict.FRAME_REFUSED) as RequestCheck.Refuse
+        assertEquals("origin_refused", badId.error); assertNull(badId.reqId)
+        assertEquals(setOf(Verdict.CHANNEL_REFUSED, Verdict.FRAME_REFUSED, Verdict.ORIGIN_REFUSED), WalletCredentialGate.SOURCE_REFUSALS)
     }
 
     // ---- reply (item 3 (e), item 12 (c)); W-N3 ----
@@ -199,7 +204,8 @@ class WalletCredentialGateTest {
         assertTrue(WalletCredentialGate.ADDRESS_COMMAND in WalletCredentialGate.GATED_COMMANDS)
         assertTrue(WalletCredentialGate.checkRequest(addrReq(), Verdict.TRUSTED) is RequestCheck.Pass)
         for (v in Verdict.values().filter { it != Verdict.TRUSTED }) {
-            assertEquals(WalletCredentialGate.NOT_TRUSTED, (WalletCredentialGate.checkRequest(addrReq(), v) as RequestCheck.Refuse).error)
+            val expected = if (v in WalletCredentialGate.SOURCE_REFUSALS) "origin_refused" else WalletCredentialGate.NOT_TRUSTED
+            assertEquals(expected, (WalletCredentialGate.checkRequest(addrReq(), v) as RequestCheck.Refuse).error)
         }
         assertEquals(WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED, (WalletCredentialGate.checkRequest(addrReq("eoaPrivateKey" to testKey), Verdict.TRUSTED) as RequestCheck.Refuse).error)
         for (bad in listOf(addrReq("mode" to "unseal", "blob" to "x"), addrReq("extra" to 1))) {
@@ -244,14 +250,14 @@ class WalletCredentialGateTest {
         val okReply = ack(JSONObject().put("eoa", testEoa)).put("reqId", 8).toString()
         // r3or §25.52Y.44 item 4: frame or origin mismatch -> origin_refused (even with a bad reqId, then reqId null);
         // other untrusted verdicts -> not_trusted; the SDK is not called
-        for (v in listOf(Verdict.FRAME_REFUSED, Verdict.ORIGIN_REFUSED)) {
+        for (v in WalletCredentialGate.SOURCE_REFUSALS) {
             val o = run(addrReq(), v, okReply)
             assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(8, o.getInt("reqId"))
             assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
             val bad = run(JSONObject().put("type", "walletEoaAddress").put("reqId", -1), v, okReply)
             assertEquals("origin_refused", bad.getString("error")); assertTrue(bad.isNull("reqId"))
         }
-        for (v in Verdict.values().filter { it != Verdict.TRUSTED && it != Verdict.FRAME_REFUSED && it != Verdict.ORIGIN_REFUSED }) {
+        for (v in Verdict.values().filter { it != Verdict.TRUSTED && it !in WalletCredentialGate.SOURCE_REFUSALS }) {
             assertEquals("not_trusted", run(addrReq(), v, okReply).getString("error"))
         }
         assertEquals(0, calls)

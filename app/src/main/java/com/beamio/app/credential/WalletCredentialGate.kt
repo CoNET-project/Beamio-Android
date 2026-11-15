@@ -63,6 +63,9 @@ object WalletCredentialGate {
 
     private val SHA256 = Regex("^[0-9a-f]{64}$")
 
+    /** Verdicts that are a source or frame mismatch (r3os): answered origin_refused. */
+    val SOURCE_REFUSALS: Set<Verdict> = setOf(Verdict.CHANNEL_REFUSED, Verdict.FRAME_REFUSED, Verdict.ORIGIN_REFUSED)
+
     /**
      * Order: channel, frame, origin (first filter only), then the build manifest, the native declaration and the bundle.
      * [requireCapability] false (shellRecordRead this round, spec r3nt §25.52Y.43 item 6 (i), PM R1863): no capability
@@ -122,6 +125,10 @@ object WalletCredentialGate {
      * field shape (walletEoaAddress takes only `{type, reqId}`). [verdict] is [evaluate] for this request.
      */
     fun checkRequest(body: JSONObject, verdict: Verdict): RequestCheck {
+        // r3os (PM R1953, R1955): a source or frame mismatch on either channel answers origin_refused exactly once, before
+        // any other check, whatever the command and reqId (null when invalid). The JS-interface path cannot see the frame,
+        // so it counts as a frame mismatch. not_trusted is only for an allowed source whose bundle or capability fails.
+        if (verdict in SOURCE_REFUSALS) return RequestCheck.Refuse(BridgeReqId.valid(body.opt("reqId")), SHELL_RECORD_ORIGIN_REFUSED)
         val reqId = BridgeReqId.valid(body.opt("reqId")) ?: return RequestCheck.Refuse(null, BAD_REQUEST)
         if (verdict != Verdict.TRUSTED) return RequestCheck.Refuse(reqId, NOT_TRUSTED)
         val keyHits = keyFieldNames(body, KEY_FIELDS)
@@ -282,7 +289,7 @@ object WalletCredentialGate {
             logs += entryLine(command, rid, v) // log point 1
             // r3or §25.52Y.44 item 4 (PM R1952, source first): on the window channel a frame or origin mismatch answers
             // origin_refused exactly once (reqId echoed when valid, else null), before any other check.
-            if (v == Verdict.FRAME_REFUSED || v == Verdict.ORIGIN_REFUSED) return done(refusal(rid, SHELL_RECORD_ORIGIN_REFUSED))
+            if (v in SOURCE_REFUSALS) return done(refusal(rid, SHELL_RECORD_ORIGIN_REFUSED))
             if (rid == null) return done(refusal(null, BAD_REQUEST))
             when (val c = checkRequest(body, v)) {
                 is RequestCheck.Refuse -> done(refusal(c.reqId, c.error), names = c.fieldNames)
