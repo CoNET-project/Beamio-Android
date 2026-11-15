@@ -145,6 +145,8 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    // Every build type carries the label; only debugqa sets it (HD.2: products are marked QA).
+    defaultConfig.buildConfigField("String", "QA_BUILD_LABEL", "\"\"")
     packaging {
         // bcprov, bcutil and bcpg each ship META-INF/LICENSE.md (same BC MIT text); keep one copy.
         resources { pickFirsts += setOf("META-INF/LICENSE.md") }
@@ -161,6 +163,12 @@ android {
         if (chatQaHooks) getByName("debug").let {
             it.java.directories.add("src/qaHooks/java"); it.kotlin.directories.add("src/qaHooks/java")
             it.manifest.srcFile("src/qaHooksDebug/AndroidManifest.xml")
+        }
+        // Spec §25.52HD (HD.1, PM R2088): debugqa is the debug build under the approved name; same QA code and manifest as debug.
+        maybeCreate("debugqa").let {
+            for (d in listOf("src/debug/java", "src/ota/java")) { it.java.directories.add(d); it.kotlin.directories.add(d) }
+            it.manifest.srcFile("src/debug/AndroidManifest.xml")
+            it.res.directories.add(if (qaCleartextNsc) "src/qaCleartextNsc/res" else "src/otaDefaultNsc/res")
         }
         val nativeKeyDir = if (chatSdkNativeKey) "src/nativekeySdk/java" else "src/nativekeyNone/java"
         getByName("main").let { it.java.directories.add(nativeKeyDir); it.kotlin.directories.add(nativeKeyDir) }
@@ -216,6 +224,18 @@ android {
             } else if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
+        }
+        // Spec §25.52HD.1/HD.2 (owner's written approval R1249, PM R2088): the internal QA build named `debugqa`, only for the
+        // Samsung S25, application id com.beamio.app.t168 (forced below), debug key only (never the store certificate), with the
+        // QA chat SDK of app/chat-sdk.lock and the QA manifest's capability bits. It declares nothing by itself: per HD.3 a
+        // capability such as the native-keys bit comes only from the SDK build. Not for release, store or anyone outside.
+        create("debugqa") {
+            initWith(getByName("debug"))
+            matchingFallbacks += listOf("debug")
+            isDebuggable = true
+            versionNameSuffix = "-debugqa"
+            signingConfig = signingConfigs.getByName("debug")
+            buildConfigField("String", "QA_BUILD_LABEL", "\"debugqa\"")
         }
         create("store") {
             initWith(getByName("release"))
@@ -458,9 +478,33 @@ tasks.configureEach {
     if (name == "packageStore" || name == "packageStoreBundle" || name == "signStoreBundle") dependsOn(verifyChatSdkNotQaForStore)
 }
 
+/**
+ * Spec §25.52HD (PM R2088): debugqa is the approved S25 QA build only. It cannot be combined with the release-QA probe
+ * variant (whose id is t168r), and a debugqa product must not reach a release or store artifact.
+ */
+if (qaReleaseVariant && gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
+    throw GradleException("debugqa is com.beamio.app.t168 only; -PqaReleaseVariant (t168r) cannot build it.")
+}
+val verifyDebugqaNotInReleaseOrStore by tasks.registering {
+    group = "verification"
+    description = "Fail a release or store packaging run that also asks for a debugqa product"
+    doLast {
+        if (gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
+            throw GradleException("debugqa (HD.1 S25 internal QA) cannot be built in the same run as a release or store package.")
+        }
+    }
+}
+tasks.configureEach {
+    if (name in setOf("packageRelease", "packageReleaseBundle", "signReleaseBundle", "packageStore", "packageStoreBundle", "signStoreBundle")) {
+        dependsOn(verifyDebugqaNotInReleaseOrStore)
+    }
+}
+
 // AGP 9 creates host unit tests for the test build type only; also run them for `store`
 // (testStoreUnitTest proves the update daemon is not on the store classpath).
 androidComponents {
+    // HD.1: the debugqa application id is exactly com.beamio.app.t168.
+    onVariants(selector().withBuildType("debugqa")) { variant -> variant.applicationId.set("com.beamio.app.t168") }
     // PM R677: release also gets host unit tests (src/testRelease checks the release build shape).
     beforeVariants(selector().withBuildType("release")) { variant ->
         (variant as? com.android.build.api.variant.HasHostTestsBuilder)
