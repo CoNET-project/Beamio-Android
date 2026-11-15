@@ -28,6 +28,20 @@ val otaLocalStub = providers.gradleProperty("otaManifestUrl").orNull != null
 // Native key import binding (spec 25.25): the SDK side compiles only against the unreleased 0.2.7 line.
 // Default: src/nativekeyNone (no native key, import unavailable, shell gate passes everything through).
 val chatSdkNativeKey = providers.gradleProperty("chatSdkNativeKey").orNull == "true"
+// PM R2079: the chat SDK version and its AAR SHA-256 are pinned in app/chat-sdk.lock. -PchatSdkVersion may be omitted;
+// when given it must equal the lock. verifyChatSdkLock checks the resolved AAR bytes on every build.
+val chatSdkLock: Map<String, String> = file("chat-sdk.lock").takeIf { it.isFile }?.readLines()
+    ?.filter { it.isNotBlank() && !it.trimStart().startsWith("#") && it.contains("=") }
+    ?.associate { it.substringBefore("=").trim() to it.substringAfter("=").trim() }
+    ?: throw GradleException("app/chat-sdk.lock missing: the chat SDK must be pinned (PM R2079).")
+val chatSdkLockedVersion: String = chatSdkLock["chat_sdk_version"]?.takeIf { it.isNotBlank() }
+    ?: throw GradleException("app/chat-sdk.lock has no chat_sdk_version")
+val chatSdkLockedSha: String = chatSdkLock["chat_sdk_aar_sha256"]?.lowercase()?.takeIf { Regex("^[0-9a-f]{64}$").matches(it) }
+    ?: throw GradleException("app/chat-sdk.lock has no valid chat_sdk_aar_sha256")
+val chatSdkLockedQa = chatSdkLock["chat_sdk_qa"] == "true"
+val chatSdkVersion: String = providers.gradleProperty("chatSdkVersion").orNull?.also {
+    if (it != chatSdkLockedVersion) throw GradleException("-PchatSdkVersion=$it is not the pinned $chatSdkLockedVersion in app/chat-sdk.lock (update the lock in its own reviewed commit).")
+} ?: chatSdkLockedVersion
 // QA write guard (PM / PWA integration 2026-11-14): -PqaWriteGuard=true turns it on in debug builds only.
 // Release and store builds always get false.
 val qaWriteGuard = providers.gradleProperty("qaWriteGuard").orNull == "true"
@@ -413,6 +427,37 @@ tasks.configureEach {
 }
 afterEvaluate { verifyStoreNoOta.configure { dependsOn("minifyStoreWithR8") } }
 
+/**
+ * PM R2079: the resolved chat SDK AAR must have the SHA-256 pinned in app/chat-sdk.lock. Runs before every build; there is
+ * no skip property. A QA-only lock (chat_sdk_qa=true) also blocks packaging a store APK or AAB.
+ */
+val verifyChatSdkLock by tasks.registering {
+    group = "verification"
+    description = "Fail unless the resolved chat SDK AAR matches app/chat-sdk.lock"
+    outputs.upToDateWhen { false }
+    val coordinate = "network.conet:chat:$chatSdkVersion@aar"
+    val aarFiles = configurations.detachedConfiguration(dependencies.create(coordinate)).apply { isTransitive = false }
+    doLast {
+        val aar = aarFiles.singleFile
+        val sha = MessageDigest.getInstance("SHA-256").digest(aar.readBytes()).joinToString("") { "%02x".format(it) }
+        if (sha != chatSdkLockedSha) {
+            throw GradleException("chat SDK $coordinate sha256 $sha != app/chat-sdk.lock $chatSdkLockedSha. Build refused.")
+        }
+        logger.lifecycle("{\"gate\":\"chat-sdk-lock\",\"result\":\"PASS\",\"version\":\"$chatSdkVersion\",\"aar_sha256\":\"$sha\",\"qa\":$chatSdkLockedQa}")
+    }
+}
+val verifyChatSdkNotQaForStore by tasks.registering {
+    group = "verification"
+    description = "Fail packaging a store build with a QA-only chat SDK"
+    doLast {
+        if (chatSdkLockedQa) throw GradleException("app/chat-sdk.lock pins a QA-only chat SDK (chat_sdk_qa=true): store packaging refused.")
+    }
+}
+tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(verifyChatSdkLock) }
+tasks.configureEach {
+    if (name == "packageStore" || name == "packageStoreBundle" || name == "signStoreBundle") dependsOn(verifyChatSdkNotQaForStore)
+}
+
 // AGP 9 creates host unit tests for the test build type only; also run them for `store`
 // (testStoreUnitTest proves the update daemon is not on the store classpath).
 androidComponents {
@@ -447,9 +492,9 @@ tasks.register<Exec>("launchDebug") {
 dependencies {
     // Native Conet Chat module (listen / send / history / presence / hybrid signing).
     // Same role as the SwiftPM `chat-sdk-ios` package: https://github.com/CoNET-project/chat-sdk-android
-    // Default 0.2.6. The native key import host and the no-key gate (spec 25.25, 25.26) need the unreleased
-    // 0.2.7 line: -PchatSdkVersion=<v> -PchatSdkLocalRepo=<dir> -PchatSdkNativeKey=true (see settings.gradle.kts).
-    implementation("network.conet:chat:${providers.gradleProperty("chatSdkVersion").getOrElse("0.2.6")}")
+    // Version pinned in app/chat-sdk.lock (PM R2079); the local maven dir comes from -PchatSdkLocalRepo (settings.gradle.kts).
+    // The native-key line also needs -PchatSdkNativeKey=true.
+    implementation("network.conet:chat:$chatSdkVersion")
     // Native route-key OpenPGP for call frames/control (off the WebView main thread).
     // BC 1.87 for every BC artifact (store runtime classpath resolves only 1.87; checked in the receipt).
     implementation("org.bouncycastle:bcpg-jdk18on:1.87")
