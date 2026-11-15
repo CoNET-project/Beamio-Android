@@ -71,11 +71,21 @@ class WalletCredentialGateTest {
         assertEquals(setOf("a.v1", "wallet.credential.v1"), WalletCredentialGate.parseCapabilities("a.v1, wallet.credential.v1,"))
     }
 
-    /** This build's manifest (the 0.53.0 QA candidate) has no capabilities array, so nothing is trusted in it today. */
+    /**
+     * The capability bits come only from the lock-bound manifest of this build (0.53.1 QA manifest: wallet.credential.v1),
+     * bound to the embedded zip; the store build type never gets QA-manifest bits (PM R2042).
+     */
     @Test
-    fun currentBuildDeclaresNoCapability() {
-        assertEquals("", BuildConfig.PWA_CAPABILITIES)
-        assertEquals("", BuildConfig.PWA_CAPABILITIES_ZIP_SHA256)
+    fun buildCapabilitiesAreBoundToTheEmbeddedZipAndNeverInStore() {
+        if (BuildConfig.PWA_CAPABILITIES.isEmpty()) {
+            assertEquals("", BuildConfig.PWA_CAPABILITIES_ZIP_SHA256)
+        } else {
+            assertEquals(setOf(WalletCredentialGate.CAPABILITY), WalletCredentialGate.parseCapabilities(BuildConfig.PWA_CAPABILITIES))
+            assertEquals(BuildConfig.PWA_ZIP_SHA256, BuildConfig.PWA_CAPABILITIES_ZIP_SHA256)
+        }
+        if (BuildConfig.BUILD_TYPE == "store") assertEquals("", BuildConfig.PWA_CAPABILITIES)
+        val gradle = File("build.gradle.kts").readText()
+        assertTrue(gradle.contains("if (!pwaCapabilitiesFromFreeze) {"))
     }
 
     // ---- request (item 3 (c)); W-N4 ----

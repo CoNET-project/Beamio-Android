@@ -93,6 +93,9 @@ val pwaCapabilities: List<String> = run {
     }
     list.distinct().sorted()
 }
+// PM R2042: bits from a QA candidate manifest are QA only. The store build type takes capability bits only from a freeze
+// manifest (which, per §25.52Y.43 item 3, carries them only with an acceptance_ref); from a QA manifest it gets none.
+val pwaCapabilitiesFromFreeze = providers.gradleProperty("pwaFreezeManifest").orNull != null
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
@@ -211,6 +214,11 @@ android {
             buildConfigField("String", "OTA_MANIFEST_URL", "\"\"")
             buildConfigField("String", "OTA_BUNDLE_BASE", "\"\"")
             buildConfigField("long", "OTA_CHECK_INTERVAL_MS", "0L")
+            // PM R2042: QA-manifest capability bits never reach a store build.
+            if (!pwaCapabilitiesFromFreeze) {
+                buildConfigField("String", "PWA_CAPABILITIES", "\"\"")
+                buildConfigField("String", "PWA_CAPABILITIES_ZIP_SHA256", "\"\"")
+            }
         }
     }
     compileOptions {
