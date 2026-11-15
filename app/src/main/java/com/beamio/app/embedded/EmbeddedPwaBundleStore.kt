@@ -59,6 +59,7 @@ open class EmbeddedPwaBundleStore internal constructor(
     private var pendingVersion: String? = readPendingVersionFromStaging()
 
     fun bootstrapIfNeeded() {
+        verifiedBundle = null
         if (!remotePwaUpdate) {
             synchronized(lock) { bootstrapStoreLocked() }
             return
@@ -73,10 +74,16 @@ open class EmbeddedPwaBundleStore internal constructor(
             }
             bundledDir.mkdirs()
             val digest = MessageDigest.getInstance("SHA-256")
+            // §25.52Y.38 item 2 (c): SHA-256 of every byte of the bundled zip, for the walletCredential trust record. The
+            // existing assetHash (bytes up to the central directory) keeps its meaning for the activation check.
+            var partialHash: String? = null
             try {
                 openBundledZip().use { input ->
                     DigestInputStream(input, digest).use { hashed ->
-                        EmbeddedPwaZip.unzip(hashed, bundledDir)
+                        EmbeddedPwaZip.unzip(object : FilterInputStream(hashed) { override fun close() {} }, bundledDir)
+                        partialHash = (digest.clone() as MessageDigest).digest().joinToString("") { byte -> "%02x".format(byte) }
+                        val buf = ByteArray(64 * 1024)
+                        while (hashed.read(buf) >= 0) Unit
                     }
                 }
             } catch (e: Exception) {
@@ -89,7 +96,8 @@ open class EmbeddedPwaBundleStore internal constructor(
                 }
                 throw IllegalStateException("Bundled SilentPassUI.zip unreadable and no complete active bundle", e)
             }
-            val assetHash = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+            val fullZipHash = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+            val assetHash = partialHash ?: fullZipHash
             if (!hasValidBundle(bundledDir)) {
                 bundledDir.deleteRecursively()
                 if (hasCompleteBundle(activeDir)) return
@@ -107,6 +115,7 @@ open class EmbeddedPwaBundleStore internal constructor(
                 throw webBuildError("Bundled SilentPassUI.zip")
             }
 
+            recordVerifiedBundleLocked(fullZipHash, bundledDir)
             val lastAssetHash = activatedAssetHash.get()
             // Repair an active web build left by an older shell.
             val activeUsesEmbeddedPaths = activeIsValid && usesEmbeddedAssetPaths(activeDir)
@@ -238,6 +247,7 @@ open class EmbeddedPwaBundleStore internal constructor(
         File(activeDir, LOADED_SHA_MARKER).writeText(zipSha)
         File(activeDir, LOADED_CONTENT_MARKER).writeText(bundledDigest)
         activatedAssetHash.set(zipSha)
+        verifiedBundle = VerifiedBundle(this, zipSha, bundledDigest)
         Log.i(
             TAG,
             "store bootstrap: source=$source ver=$bundledVersion zipSha256=${shortDigest(zipSha)} " +
@@ -350,6 +360,50 @@ open class EmbeddedPwaBundleStore internal constructor(
             backupDir.renameTo(activeDir)
         }
         return false
+    }
+
+    /**
+     * §25.52Y.38 item 2 (b)(c)(g): remember, in memory only, the content digest of the bundled zip when every byte of it
+     * hashes to [expectedZipSha256] (pwa-embed.lock). Nothing is written to disk, so a downloaded bundle cannot plant it.
+     */
+    private fun recordVerifiedBundleLocked(fullZipSha: String, bundledDir: File) {
+        val expected = expectedZipSha256 ?: return
+        if (fullZipSha != expected) {
+            Log.w(TAG, "bootstrap: bundled zip sha256 ${shortDigest(fullZipSha)} != lock ${shortDigest(expected)}; no trust record")
+            return
+        }
+        verifiedBundle = VerifiedBundle(this, fullZipSha, contentDigest(bundledDir))
+    }
+
+    /**
+     * §25.52Y.38 item 2 (c) (iii) / §25.52Y.41 item 2: the zip SHA-256 whose bytes active/ holds now, or null. active/
+     * must have exactly the content of the bundled zip verified at this process's bootstrap; a downloaded (OTA) bundle,
+     * a partial or changed active/, or a process whose bootstrap could not hash the zip gives null. The full content
+     * digest is recomputed whenever the file list, sizes or modification times differ from the last check.
+     */
+    fun verifiedActiveZipSha256(): String? = synchronized(lock) {
+        val v = verifiedBundle?.takeIf { it.store === this } ?: return null
+        try {
+            val fp = activeFingerprint()
+            if (fp != v.checkedFingerprint) {
+                v.matches = contentDigest(activeDir) == v.contentDigest
+                v.checkedFingerprint = fp
+            }
+            if (v.matches) v.zipSha256 else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Relative path, size and modification time of every content file of active/ (no contents), hashed. */
+    private fun activeFingerprint(): String {
+        val root = activeDir.canonicalFile
+        if (!root.isDirectory) return "absent"
+        val lines = root.walkTopDown()
+            .filter { it.isFile && it.name != LOADED_SHA_MARKER && it.name != LOADED_CONTENT_MARKER }
+            .map { f -> f.canonicalFile.relativeTo(root).invariantSeparatorsPath + "\u0000" + f.length() + "\u0000" + f.lastModified() }
+            .sorted().toList()
+        return digestOfLines(lines)
     }
 
     /**
@@ -482,8 +536,20 @@ open class EmbeddedPwaBundleStore internal constructor(
         }
     }
 
+    /** In-memory trust record of the bundled zip verified by this process's bootstrap (see [verifiedActiveZipSha256]). */
+    private class VerifiedBundle(val store: EmbeddedPwaBundleStore, val zipSha256: String, val contentDigest: String) {
+        var checkedFingerprint: String? = null
+        var matches: Boolean = false
+    }
+
     companion object {
         private val PROCESS_LOCK = Any()
+
+        /** Process-wide: one bootstrap per process; set by it, read by [verifiedActiveZipSha256] under [PROCESS_LOCK]. */
+        @Volatile private var verifiedBundle: VerifiedBundle? = null
+
+        /** The zip SHA-256 active/ provably holds now (see the instance method), from the store that bootstrapped last. */
+        fun currentVerifiedActiveZipSha256(): String? = verifiedBundle?.store?.verifiedActiveZipSha256()
         private const val TAG = "BeamioEmbeddedPwa"
         private const val PREFS_NAME = "embedded_pwa_bundle"
         private const val KEY_ACTIVATED_ASSET_SHA256 = "activated_asset_sha256"

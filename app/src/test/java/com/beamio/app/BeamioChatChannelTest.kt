@@ -49,9 +49,9 @@ class BeamioChatChannelTest {
     fun wiring() {
         val src = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(src.contains("BeamioChatChannel.attach("))
-        assertTrue(src.contains("onCommand = { json, deliver -> handleChatCommand(json, deliver) }"))
+        assertTrue(src.contains("onCommand = { json, deliver -> handleChatCommand(json, WalletCredentialGate.Channel.WEB_MESSAGE, deliver) }"))
         // legacy channel: origin gate, then the same shared path
-        assertTrue(src.contains("handleChatCommand(json) { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }"))
+        assertTrue(src.contains("handleChatCommand(json, WalletCredentialGate.Channel.JS_INTERFACE) { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }"))
         // R758: both shouldOverrideUrlLoading variants hand other-origin top-level navigations away from the embedded WebView
         assertEquals(2, Regex("if \\(leaveEmbeddedForExternal\\(").findAll(src).count())
         val leave = Regex("private fun leaveEmbeddedForExternal\\(url: String\\): Boolean \\{(.*?)\\n    \\}", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]

@@ -11,6 +11,9 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.beamio.app.BuildConfig
+import android.os.SystemClock
+import com.beamio.app.credential.ShellCredentialTrust
+import com.beamio.app.credential.WalletCredentialGate
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -76,7 +79,9 @@ object ShellRecordChannel {
             val data = message.data ?: run { reply.postMessage(BAD_REQUEST); return@addWebMessageListener }
             val embedded = isMainFrame && sourceOrigin.toString().trimEnd('/') == ORIGIN
             val size = data.toByteArray(Charsets.UTF_8).size
+            val origin = sourceOrigin.toString()
             worker.execute {
+                val started = SystemClock.elapsedRealtime()
                 // Unparsable JSON never reaches the SDK (AX.1); unknown types and bad reqIds are answered by the SDK handler.
                 val parsed = runCatching { org.json.JSONObject(data) }.isSuccess
                 var out = if (!parsed) BAD_REQUEST
@@ -84,6 +89,25 @@ object ShellRecordChannel {
                 val hits = LegacyRecord.pgpPrivateHits(out.toCharArray())
                 if (hits != 0) { log("channel exit assert FAIL pgpPrivateHits=$hits"); out = ShellRecordReplies.fallback(data) }
                 else log("channel exit assert pass")
+                // Spec r3nq §25.52Y.41: W fields (privateKeyArmor, mnemonicPhrase, recoveryWords) leave only behind the
+                // trust gate (origin, main frame, verified bundle); otherwise the whole reply is not_trusted. This round no
+                // capability check (r3nt §25.52Y.43 item 6 (i), PM R1863). Logs: names, verdict, code, ms only.
+                val gated = try {
+                    WalletCredentialGate.gateShellRecordRead(data, out) {
+                        ShellCredentialTrust.verdict(WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin, requireCapability = false)
+                    }
+                } catch (e: Exception) {
+                    log(WalletCredentialGate.errorLine(WalletCredentialGate.SHELL_RECORD_READ, ShellRecordReplies.validReqId(data), e)) // log point 3
+                    WalletCredentialGate.ShellRecordGateResult(
+                        WalletCredentialGate.refusal(ShellRecordReplies.validReqId(data), WalletCredentialGate.NOT_TRUSTED).toString(), null, emptyList(),
+                    )
+                }
+                out = gated.reply
+                gated.verdict?.let { v ->
+                    log(WalletCredentialGate.entryLine(WalletCredentialGate.SHELL_RECORD_READ, ShellRecordReplies.validReqId(data), v)) // log point 1
+                    val ev = runCatching { org.json.JSONObject(out) }.getOrNull() ?: org.json.JSONObject()
+                    log(WalletCredentialGate.replyLine(WalletCredentialGate.SHELL_RECORD_READ, ev, SystemClock.elapsedRealtime() - started, gated.wFields)) // log point 2
+                }
                 main.post { runCatching { reply.postMessage(out) } }
             }
         }

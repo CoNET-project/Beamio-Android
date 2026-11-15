@@ -132,6 +132,8 @@ class QaWriteGuardTest {
         for (t in listOf("hello", "walletStatus", "nativeRecoveryOpen")) assertTrue(t, t in allowed)
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(main.contains("QaWriteGuard.sdkCommandAllowed(body.optString(\"type\"))"))
-        assertTrue(main.indexOf("QaWriteGuard.sdkCommandAllowed") < main.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body)"))
+        assertTrue(main.indexOf("QaWriteGuard.sdkCommandAllowed") < main.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
+        // r3np: walletCredential (read-only, local) is forwarded in guard builds only after the shell trust gate
+        assertTrue("walletCredential" in allowed)
     }
 }

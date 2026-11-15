@@ -57,6 +57,9 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import com.beamio.app.credential.SdkPayloadFilter
+import com.beamio.app.credential.ShellCredentialTrust
+import com.beamio.app.credential.WalletCredentialGate
 import com.beamio.app.embedded.EmbeddedPwaConstants
 import com.beamio.app.embedded.EmbeddedPwaHost
 import com.beamio.app.embedded.EmbeddedPwaOtaFactory
@@ -112,6 +115,8 @@ class MainActivity : ComponentActivity() {
             </body>
         """.trimIndent()
         private const val TAG = "MainActivity"
+        /** walletCredential / key-field gate log tag (spec r3np §25.52Y.38 item 11 (c) points 1-3): names and codes only. */
+        private const val CREDENTIAL_TAG = "BeamioCredential"
         /** Longest the dial screen waits for the page's offer before it shows anyway. */
         private const val PREPARED_SCREEN_MAX_WAIT_MS = 600L
 
@@ -1744,7 +1749,8 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread { dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "chatModuleEvent").put("event", refused)) }
                 return
             }
-            handleChatCommand(json) { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }
+            // §25.52Y.38 item 2 (d): this JavascriptInterface path is open to every frame, so walletCredential is refused here.
+            handleChatCommand(json, WalletCredentialGate.Channel.JS_INTERFACE) { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }
         }
 
         /** PWA answer to a `chatModuleSignRequest`: `{ reqId, ok, signature?, error? }`. */
@@ -1823,7 +1829,7 @@ class MainActivity : ComponentActivity() {
         return ack.put("ok", true)
     }
 
-    private fun handleChatCommand(json: String, deliver: (JSONObject) -> Unit) {
+    private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
         val body = try {
             JSONObject(json)
         } catch (_: Exception) {
@@ -1837,6 +1843,17 @@ class MainActivity : ComponentActivity() {
         // A send keeps the process running until the module answers it (see BeamioChatSendHold).
         // QA DIAG (debug only): command type and reqId only; never other fields.
         if (BuildConfig.DEBUG) android.util.Log.i("BeamioQaBridge", "cmd type=${body.optString("type")} reqId=${body.opt("reqId")}")
+        // Spec r3np §25.52Y.38: walletCredential has its own path (trust gate, request and reply checks, redacted logs).
+        if (body.optString("type") == WalletCredentialGate.COMMAND) {
+            handleWalletCredential(body, channel, deliver)
+            return
+        }
+        // §25.52Y.38 item 14, W-N1: no other command may carry the credential field names walletCredential introduces.
+        WalletCredentialGate.otherCommandRequestKeyFields(body).takeIf { it.isNotEmpty() }?.let { names ->
+            Log.i(CREDENTIAL_TAG, "refused cmd=${logSafeType(body.optString("type"))} reqId=${BridgeReqId.valid(body.opt("reqId")) ?: "null"} fields=$names")
+            deliver(chatEvent(WalletCredentialGate.refusal(BridgeReqId.valid(body.opt("reqId")), WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED)))
+            return
+        }
         if (!QaWriteGuard.sdkCommandAllowed(body.optString("type"))) {
             QaWriteGuard.log("guard blocked-sdk-command ${body.optString("type").take(40)}")
             if (body.has("reqId")) {
@@ -1847,25 +1864,85 @@ class MainActivity : ComponentActivity() {
             return
         }
         BeamioChatSendHold.onCommand(applicationContext, body)
-        BeamioConetChatModule.handleCommand(applicationContext, body) { payload ->
-            if (BuildConfig.DEBUG) payload.optJSONObject("event")?.let { e ->
-                val t = e.optString("type")
-                if (t == "ack" || t == "ready" || t.startsWith("native") || t.startsWith("recovery")) {
-                    val eoa = e.optString("eoa").let { a -> if (a.length == 42) a.take(6) + "…" + a.takeLast(4) else "" } // public address, short form
-                    android.util.Log.i("BeamioQaBridge", "evt type=$t reqId=${e.opt("reqId")} ok=${e.opt("ok")} error=${e.optString("error")} code=${e.optString("code")} eoa=$eoa")
-                    e.optJSONObject("result")?.let { r ->
-                        // Key names, plus values of a few public status fields only; addresses in short form.
-                        // notReadyReason (spec §25.52Y.39 items 9-10): only g1_uninitialized | unreadable are printed, else <unknown>.
-                        val keys = r.keys().asSequence().toList().sorted()
-                        val pub = listOf("state", "status", "notReadyReason", "ready", "hasKey", "code", "kind").filter { r.has(it) }.joinToString(" ") { "$it=${QaBridgeLogFields.value(it, r.opt(it))}" }
-                        val addr = listOf("eoa", "address").firstOrNull { r.optString(it).length == 42 }?.let { k -> r.optString(k).let { a -> "$k=" + a.take(6) + "…" + a.takeLast(4) } } ?: ""
-                        android.util.Log.i("BeamioQaBridge", "   result keys=$keys $pub $addr")
-                        r.optJSONArray("capabilities")?.let { c -> android.util.Log.i("BeamioQaBridge", "   capabilities=" + (0 until c.length()).joinToString(",") { c.optString(it) } + " sdkVersion=" + r.optString("sdkVersion")) }
-                    }
-                }
-            }
+        BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
+    }
+
+    /**
+     * Every SDK payload on its way to the page, whichever command's deliver the SDK uses for it (the SDK keeps the latest
+     * one for later events): a walletCredential ack (by pending reqId) passes only in the shape of §25.52Y.38 item 3 (e);
+     * any other payload carrying `mnemonic` / `eoaPrivateKey` is refused (item 14, W-N2). Then the debug summary
+     * (never for walletCredential), the send hold and the caller's channel.
+     */
+    private fun sdkDeliver(deliver: (JSONObject) -> Unit): (JSONObject) -> Unit = { raw ->
+        val r = sdkPayloadFilter.filter(raw)
+        r.logLine?.let { Log.i(CREDENTIAL_TAG, it) } // log point 2 for walletCredential replies
+        r.payload?.let { payload ->
+            if (!r.credentialReply) debugSdkEvent(payload)
             BeamioChatSendHold.onModuleEvent(payload)
             deliver(payload)
+        }
+    }
+
+    private val sdkPayloadFilter = SdkPayloadFilter { SystemClock.elapsedRealtime() }
+
+    /**
+     * Spec r3np §25.52Y.38 items 2, 3, 11, 13 (a): the shell's part of walletCredential. Off the main thread (hashing active/
+     * may take a moment). Refusals are answered once on the caller's channel; only a trusted, well-formed request reaches
+     * the SDK, which owns the rest (item 13 (b)). Logs: entry (point 1), reply (point 2), error filter (point 3).
+     */
+    private fun handleWalletCredential(body: JSONObject, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
+        val rid = BridgeReqId.valid(body.opt("reqId"))
+        val started = SystemClock.elapsedRealtime()
+        credentialWorker.execute {
+            try {
+                // BeamioChatChannel.decide only lets main-frame messages from the trusted origin become a Command.
+                val web = channel == WalletCredentialGate.Channel.WEB_MESSAGE
+                val verdict = ShellCredentialTrust.verdict(channel, isMainFrame = web, sourceOrigin = if (web) ChatOriginGate.TRUSTED else embeddedTopOrigin)
+                Log.i(CREDENTIAL_TAG, WalletCredentialGate.entryLine(WalletCredentialGate.COMMAND, rid, verdict)) // log point 1
+                when (val c = WalletCredentialGate.checkRequest(body, verdict)) {
+                    is WalletCredentialGate.RequestCheck.Refuse -> {
+                        val refused = WalletCredentialGate.refusal(c.reqId, c.error)
+                        Log.i(CREDENTIAL_TAG, WalletCredentialGate.replyLine(WalletCredentialGate.COMMAND, refused, SystemClock.elapsedRealtime() - started, c.fieldNames)) // log point 2
+                        deliver(chatEvent(refused))
+                    }
+                    WalletCredentialGate.RequestCheck.Pass -> {
+                        if (!QaWriteGuard.sdkCommandAllowed(WalletCredentialGate.COMMAND)) {
+                            deliver(chatEvent(WalletCredentialGate.refusal(rid, "qa_write_blocked")))
+                            return@execute
+                        }
+                        sdkPayloadFilter.expectCredentialReply(rid!!)
+                        BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(CREDENTIAL_TAG, WalletCredentialGate.errorLine(WalletCredentialGate.COMMAND, rid, e)) // log point 3
+                rid?.let { sdkPayloadFilter.cancel(it) }
+                deliver(chatEvent(WalletCredentialGate.refusal(rid, "unavailable")))
+            }
+        }
+    }
+
+    private val credentialWorker = Executors.newSingleThreadExecutor()
+    private fun chatEvent(event: JSONObject): JSONObject = SdkPayloadFilter.event(event)
+    private fun logSafeType(t: String): String = t.takeIf { it.matches(Regex("^[A-Za-z]{1,40}$")) } ?: "<other>"
+
+    /** QA DIAG (debug only): summary of one SDK event; never called for a walletCredential reply. */
+    private fun debugSdkEvent(payload: JSONObject) {
+        if (BuildConfig.DEBUG) payload.optJSONObject("event")?.let { e ->
+            val t = e.optString("type")
+            if (t == "ack" || t == "ready" || t.startsWith("native") || t.startsWith("recovery")) {
+                val eoa = e.optString("eoa").let { a -> if (a.length == 42) a.take(6) + "…" + a.takeLast(4) else "" } // public address, short form
+                android.util.Log.i("BeamioQaBridge", "evt type=$t reqId=${e.opt("reqId")} ok=${e.opt("ok")} error=${e.optString("error")} code=${e.optString("code")} eoa=$eoa")
+                e.optJSONObject("result")?.let { r ->
+                    // Key names, plus values of a few public status fields only; addresses in short form.
+                    // notReadyReason (spec §25.52Y.39 items 9-10): only g1_uninitialized | unreadable are printed, else <unknown>.
+                    val keys = r.keys().asSequence().toList().sorted()
+                    val pub = listOf("state", "status", "notReadyReason", "ready", "hasKey", "code", "kind").filter { r.has(it) }.joinToString(" ") { "$it=${QaBridgeLogFields.value(it, r.opt(it))}" }
+                    val addr = listOf("eoa", "address").firstOrNull { r.optString(it).length == 42 }?.let { k -> r.optString(k).let { a -> "$k=" + a.take(6) + "…" + a.takeLast(4) } } ?: ""
+                    android.util.Log.i("BeamioQaBridge", "   result keys=$keys $pub $addr")
+                    r.optJSONArray("capabilities")?.let { c -> android.util.Log.i("BeamioQaBridge", "   capabilities=" + (0 until c.length()).joinToString(",") { c.optString(it) } + " sdkVersion=" + r.optString("sdkVersion")) }
+                }
+            }
         }
     }
 
@@ -3473,7 +3550,7 @@ class MainActivity : ComponentActivity() {
             ShellRecordChannel.attach(this)
             BeamioChatChannel.attach(
                 this,
-                onCommand = { json, deliver -> handleChatCommand(json, deliver) },
+                onCommand = { json, deliver -> handleChatCommand(json, WalletCredentialGate.Channel.WEB_MESSAGE, deliver) },
                 onSignResponse = { json -> jsBridge.chatModuleSignResponse(json) },
             )
             BeamioShellChannel.attach(this) { call -> handleShellCall(jsBridge, call) }

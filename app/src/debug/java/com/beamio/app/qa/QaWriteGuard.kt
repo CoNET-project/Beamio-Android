@@ -167,6 +167,7 @@ object QaWriteGuard {
     val SDK_COMMANDS_ALLOWED = setOf(
         "hello", "walletStatus", "identityPublic", "destroy", "pgpRestoreEvaluate",
         "nativeRecoveryOpen", "nativeImportOpen", "nativeAccountCreateOpen",
+        "walletCredential", // spec r3np §25.52Y.38: read-only, local; the shell trust gate runs before this guard
     )
 
     /** true = forward to the SDK. Always true outside guard builds. */

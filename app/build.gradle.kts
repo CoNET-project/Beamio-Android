@@ -64,6 +64,35 @@ val pwaEmbedLock: Map<String, String> = file("pwa-embed.lock").takeIf { it.isFil
     ?: emptyMap()
 val embeddedPwaZipSha256: String = pwaEmbedLock["zip_sha256"]?.lowercase()
     ?.takeIf { Regex("^[0-9a-f]{64}$").matches(it) } ?: ""
+// Spec r3np §25.52Y.38 item 2 (a) / r3nq §25.52Y.41 item 3: the embedded PWA's capability bits (e.g. the walletCredential bit)
+// come only from the build manifest handed to the PWA version gate (-PpwaFreezeManifest or -PpwaQaManifest, with
+// -PpwaUnreleasedTest=true): its "capabilities" array of strings, bound to its zip_sha256, which must equal pwa-embed.lock.
+// No other source: not the page, not a shell constant, not a Gradle switch. Without such a manifest the list is empty, so
+// walletCredential and the shellRecordRead W-field read-back answer not_trusted.
+val pwaCapabilities: List<String> = run {
+    val unreleased = providers.gradleProperty("pwaUnreleasedTest").orNull == "true"
+    val freezePath = providers.gradleProperty("pwaFreezeManifest").orNull
+    val manifestPath = if (unreleased) freezePath ?: providers.gradleProperty("pwaQaManifest").orNull else null
+    val manifestFile = manifestPath?.let { file(it) }?.takeIf { it.isFile } ?: return@run emptyList()
+    // The manifest file itself must be the one the sync script recorded in pwa-embed.lock (freeze_manifest_sha256 or
+    // qa_manifest_sha256), so an edited copy cannot add bits.
+    val lockedManifestSha = pwaEmbedLock[if (freezePath != null) "freeze_manifest_sha256" else "qa_manifest_sha256"]?.lowercase()
+    val manifestFileSha = MessageDigest.getInstance("SHA-256").digest(manifestFile.readBytes()).joinToString("") { "%02x".format(it) }
+    @Suppress("UNCHECKED_CAST")
+    val manifest = JsonSlurper().parse(manifestFile) as Map<String, Any?>
+    val raw = manifest["capabilities"] ?: return@run emptyList()
+    if (lockedManifestSha == null || manifestFileSha != lockedManifestSha) {
+        throw GradleException("manifest $manifestFile declares capabilities but is not the manifest file recorded in pwa-embed.lock")
+    }
+    val list = (raw as? List<*>)?.map { it as? String ?: throw GradleException("manifest capabilities must be strings: $manifestFile") }
+        ?: throw GradleException("manifest capabilities must be an array: $manifestFile")
+    list.forEach { if (!Regex("^[a-z0-9][a-z0-9.-]{0,63}$").matches(it)) throw GradleException("bad capability name in $manifestFile") }
+    val sha = manifest["zip_sha256"]?.toString()?.lowercase()
+    if (embeddedPwaZipSha256.isEmpty() || sha != embeddedPwaZipSha256) {
+        throw GradleException("manifest $manifestFile declares capabilities but its zip_sha256 is not the pwa-embed.lock zip_sha256")
+    }
+    list.distinct().sorted()
+}
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
@@ -92,6 +121,9 @@ android {
         // SHA-256 of the bundled SilentPassUI.zip; the store bootstrap refuses to load anything else.
         // With -PpwaFreezeManifest the preBuild gate already requires this file to equal the frozen zip_sha256.
         buildConfigField("String", "PWA_ZIP_SHA256", "\"$embeddedPwaZipSha256\"")
+        // §25.52Y.38 item 2 (a): capability bits of that same package and the zip_sha256 they are bound to ("" when none).
+        buildConfigField("String", "PWA_CAPABILITIES", "\"${pwaCapabilities.joinToString(",")}\"")
+        buildConfigField("String", "PWA_CAPABILITIES_ZIP_SHA256", "\"${if (pwaCapabilities.isEmpty()) "" else embeddedPwaZipSha256}\"")
     }
     buildFeatures {
         buildConfig = true

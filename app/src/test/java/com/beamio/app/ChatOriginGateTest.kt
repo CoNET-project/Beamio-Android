@@ -40,9 +40,9 @@ class ChatOriginGateTest {
         val body = Regex("fun chatModuleCommand\\(json: String\\) \\{(.*?)\\n        \\}\\n", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
         // R763: the shared command path (JSON, reqId, SDK) moved to handleChatCommand, which the legacy entry calls only
         // after the origin gate; window.BeamioChat reaches it only through BeamioChatChannel.decide (origin and main frame).
-        assertTrue(body.indexOf("ChatOriginGate.allowed") < body.indexOf("handleChatCommand(json)"))
+        assertTrue(body.indexOf("ChatOriginGate.allowed") < body.indexOf("handleChatCommand(json, WalletCredentialGate.Channel.JS_INTERFACE)"))
         assertFalse(body.contains("BeamioConetChatModule.handleCommand"))
-        val shared = Regex("private fun handleChatCommand\\(json: String, deliver: \\(JSONObject\\) -> Unit\\) \\{(.*?)\\n    \\}\\n", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
+        val shared = Regex("private fun handleChatCommand\\(json: String, channel: WalletCredentialGate.Channel, deliver: \\(JSONObject\\) -> Unit\\) \\{(.*?)\\n    \\}\\n", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
         assertTrue(shared.indexOf("JSONObject(json)") < shared.indexOf("BeamioConetChatModule.handleCommand"))
         assertEquals(2, Regex("handleChatCommand\\(json").findAll(src).count() - 1) // definition + two callers
         assertTrue(src.contains("\"origin_refused\"") || src.contains("ChatOriginGate.ERROR"))

@@ -12,14 +12,21 @@ import java.io.File
  */
 class WalletStatusPassThroughTest {
     private val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
-    private val handler = main.substringAfter("private fun handleChatCommand(json: String, deliver: (JSONObject) -> Unit) {")
+    private val handler = main.substringAfter("private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {")
         .substringBefore("\n    private var qaEvalReceiver")
 
     @Test
     fun moduleEventsReachThePageUnchanged() {
-        // The SDK callback hands its payload straight to deliver(payload); the only reads of `result` are debug logs.
-        assertTrue(handler.contains("BeamioConetChatModule.handleCommand(applicationContext, body) { payload ->"))
+        // The SDK callback goes through sdkDeliver: SdkPayloadFilter (walletCredential shape, W-N2 key names), then
+        // deliver(payload); the only reads of `result` in the activity are debug logs.
+        assertTrue(handler.contains("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
         assertTrue(handler.contains("BeamioChatSendHold.onModuleEvent(payload)\n            deliver(payload)"))
+        // r3np: a walletStatus answer with notReadyReason passes the filter as the very same object, unchanged.
+        val payload = org.json.JSONObject().put("action", "chatModuleEvent").put("event", org.json.JSONObject().put("type", "ack").put("reqId", 3).put("ok", true)
+            .put("result", org.json.JSONObject().put("status", "not_ready").put("notReadyReason", "g1_uninitialized")))
+        val before = payload.toString()
+        val r = com.beamio.app.credential.SdkPayloadFilter { 0L }.filter(payload)
+        assertTrue(r.payload === payload); assertEquals(before, r.payload.toString()); assertFalse(r.credentialReply)
         for (rewrite in listOf(".remove(", "result\", JSONObject()", "put(\"result\"", "notReadyReason\")")) {
             assertFalse("no result rewriting: $rewrite", handler.contains(rewrite))
         }

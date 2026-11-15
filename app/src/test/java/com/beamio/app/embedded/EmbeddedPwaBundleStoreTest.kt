@@ -598,6 +598,60 @@ class EmbeddedPwaBundleStoreTest {
         assertTrue(gradle.contains("maybeCreate(\"store\").let { it.java.directories.add(\"src/qaGuardStub/java\")"))
     }
 
+    // Spec r3np §25.52Y.38 item 2 (b)(c)(g): the walletCredential trust record (in memory, set by bootstrap only).
+
+    @Test
+    fun trustRecordStoreBuildMatchesUntilActiveChanges() {
+        bundledZip = zipOf("", "1.0.0", padding = 3)
+        val sha = sha256(bundledZip!!)
+        val store = storeStore()
+        store.bootstrapIfNeeded()
+        assertEquals(sha, store.verifiedActiveZipSha256())
+        assertEquals(sha, EmbeddedPwaBundleStore.currentVerifiedActiveZipSha256())
+        File(store.activeDir, "static/js/main.js").appendText("// changed")
+        assertNull(store.verifiedActiveZipSha256())
+    }
+
+    @Test
+    fun trustRecordRemoteBuildHashesEveryByteOfTheZip() {
+        val zip = zipOf("", "1.0.0", padding = 3)
+        val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(zip) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = sha256(zip))
+        store.bootstrapIfNeeded()
+        assertEquals(sha256(zip), store.verifiedActiveZipSha256())
+        assertTrue(hashStore.value != null)
+    }
+
+    @Test
+    fun trustRecordAbsentWhenLockDiffersOrIsMissing() {
+        val zip = zipOf("", "1.0.0")
+        for (expected in listOf(null, "0".repeat(64))) {
+            root.deleteRecursively(); root.mkdirs()
+            val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(zip) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = expected)
+            store.bootstrapIfNeeded()
+            assertNull("expected=$expected", store.verifiedActiveZipSha256())
+        }
+    }
+
+    @Test
+    fun trustRecordAbsentWhenANewerDownloadedBundleIsActive() {
+        val zip = zipOf("", "1.0.0")
+        val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(zip) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = sha256(zip))
+        writeBundle(store.activeDir, "", "2.0.0")
+        // A downloaded bundle cannot plant trust: markers in active/ are not the record.
+        File(store.activeDir, EmbeddedPwaBundleStore.LOADED_SHA_MARKER).writeText(sha256(zip))
+        store.bootstrapIfNeeded()
+        assertEquals("2.0.0", store.activeVersion())
+        assertNull(store.verifiedActiveZipSha256())
+    }
+
+    @Test
+    fun trustRecordAbsentWhenTheZipCannotBeRead() {
+        val store = EmbeddedPwaBundleStore(root, { throw java.io.IOException("unreadable") }, hashStore, remotePwaUpdate = true, expectedZipSha256 = "a".repeat(64))
+        writeBundle(store.activeDir, "", "1.0.0")
+        store.bootstrapIfNeeded()
+        assertNull(store.verifiedActiveZipSha256())
+    }
+
     private fun assertActiveIsEmbedded(store: EmbeddedPwaBundleStore) {
         val html = File(store.activeDir, "index.html").readText()
         assertTrue(html, EmbeddedPwaBundleStore.indexHtmlUsesEmbeddedAssetPaths(html))
