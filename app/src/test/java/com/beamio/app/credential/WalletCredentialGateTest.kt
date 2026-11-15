@@ -368,19 +368,24 @@ class WalletCredentialGateTest {
         val out = WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord.put("nickname", "n"))) { v }
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, out.verdict)
         val o = JSONObject(out.reply)
-        // r3os: a bundle failure (allowed source) is not_trusted, envelope-level; no record, no other field
-        assertEquals("not_trusted", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
+        // r3ow (PM R1970/R1974): for shellRecordRead a bundle failure also answers origin_refused, envelope-level; no record
+        assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
         assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
         assertEquals(listOf("mnemonicPhrase", "privateKeyArmor", "recoveryWords"), out.wFields)
     }
 
-    /** Reviewer (R1969) on 0cd8bdf7: a bundle failure answers not_trusted; only a source/frame mismatch is origin_refused. */
+    /**
+     * r3ow §25.52Y.41 item 6 (PM R1974): shellRecordRead answers origin_refused for a bundle failure as well as for a source
+     * mismatch (the PWA does not handle not_trusted yet); not_trusted stays for the two new commands only.
+     */
     @Test
-    fun y41_bundleFailureIsNotTrustedSourceMismatchIsOriginRefused() {
+    fun y41_readBackRefusalIsOriginRefusedForBundleAndSource() {
         val v = WalletCredentialGate.evaluate(trusted(active = null), requireCapability = false)
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, v)
         val o = JSONObject(WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord)) { v }.reply)
-        assertEquals("not_trusted", o.getString("error")); assertEquals(false, o.getBoolean("ok"))
+        assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok"))
+        // the new commands still answer not_trusted for a bundle failure
+        assertEquals("not_trusted", JSONObject(WalletCredentialGate.windowCredential(addrReq(), { v }, { "" }, { 0L }).reply).getString("error"))
         assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
         for (sv in WalletCredentialGate.SOURCE_REFUSALS) {
             assertEquals("origin_refused", JSONObject(WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord)) { sv }.reply).getString("error"))

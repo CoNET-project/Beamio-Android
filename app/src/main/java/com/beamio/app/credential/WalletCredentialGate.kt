@@ -241,10 +241,10 @@ object WalletCredentialGate {
         if (names.isEmpty()) return ShellRecordGateResult(reply, null, names)
         val v = verdict() // evaluated only when W fields would go out (hashing active/ is the costly step)
         if (v == Verdict.TRUSTED) return ShellRecordGateResult(reply, v, names)
-        // r3os: source/frame mismatch -> origin_refused; an allowed source whose bundle check fails -> not_trusted.
-        val rid = BridgeReqId.fromJsonText(request)
-        val out = if (v in SOURCE_REFUSALS) shellRecordRefusal(rid) else refusal(rid, NOT_TRUSTED).toString()
-        return ShellRecordGateResult(out, v, names)
+        // r3ow §25.52Y.41 item 6 (PM R1970, R1973, R1974): for shellRecordRead / shellRecordWrite both a source/frame
+        // mismatch and a bundle failure answer origin_refused (exception to r3os item 4: the PWA does not handle
+        // not_trusted yet). not_trusted is only for the two new commands.
+        return ShellRecordGateResult(shellRecordRefusal(BridgeReqId.fromJsonText(request)), v, names)
     }
 
     /** [reply] goes to the page; [verdict] is null when no W field was involved; [wFields] are names only. */
