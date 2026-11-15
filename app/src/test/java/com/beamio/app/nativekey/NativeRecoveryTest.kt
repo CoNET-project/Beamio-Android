@@ -80,18 +80,19 @@ class NativeRecoveryTest {
 
     @Test
     fun resultEventCarriesOnlyCodeAndPublicFields() {
-        val ok = NativeRecoveryFlow.resultEvent(RecoveryOutcome(RecoveryCode.OK, eoa, cooldownSec = 30))
+        val ok = NativeRecoveryFlow.resultEvent(7, RecoveryOutcome(RecoveryCode.OK, eoa, cooldownSec = 30))
         assertEquals("nativeRecoveryResult", ok.getString("type"))
         assertEquals("ok", ok.getString("code"))
         assertEquals(eoa, ok.getString("eoa"))
         assertFalse(ok.has("cooldownSec"))
-        assertEquals(setOf("type", "code", "eoa"), ok.keys().asSequence().toSet())
+        assertEquals(setOf("type", "reqId", "code", "eoa"), ok.keys().asSequence().toSet())
+        assertEquals(7, ok.getInt("reqId"))
 
-        val fail = NativeRecoveryFlow.resultEvent(RecoveryOutcome(RecoveryCode.NOT_FOUND, eoa))
+        val fail = NativeRecoveryFlow.resultEvent(7, RecoveryOutcome(RecoveryCode.NOT_FOUND, eoa))
         assertFalse(fail.has("eoa"))
-        val back = NativeRecoveryFlow.resultEvent(RecoveryOutcome(RecoveryCode.BACKOFF, cooldownSec = 60))
+        val back = NativeRecoveryFlow.resultEvent(7, RecoveryOutcome(RecoveryCode.BACKOFF, cooldownSec = 60))
         assertEquals(60, back.getInt("cooldownSec"))
-        val badAddr = NativeRecoveryFlow.resultEvent(RecoveryOutcome(RecoveryCode.OK, "not-an-address"))
+        val badAddr = NativeRecoveryFlow.resultEvent(7, RecoveryOutcome(RecoveryCode.OK, "not-an-address"))
         assertFalse(badAddr.has("eoa"))
     }
 
@@ -204,9 +205,28 @@ class NativeRecoveryTest {
         assertNull(b2.seenAccount)
     }
 
+    /**
+     * Spec §25.52Y.27 (r3na): no nativeRecoveryResult without reqId. The shell's builder takes reqId as a required argument,
+     * the dead result sink is gone, and no other main-source code builds the event (the SDK's emit carries reqId).
+     */
+    @Test
+    fun noRecoveryResultWithoutReqId() {
+        val e = NativeRecoveryFlow.resultEvent("w3", RecoveryOutcome(RecoveryCode.NOT_FOUND))
+        assertEquals("w3", e.getString("reqId"))
+        val src = java.io.File("src/main/java/com/beamio/app/nativekey/NativeRecovery.kt").readText()
+        assertTrue(src.contains("fun resultEvent(reqId: Any, o: RecoveryOutcome): JSONObject"))
+        assertTrue(src.contains(".put(\"type\", NativeRecoveryProtocol.RESULT_EVENT).put(\"reqId\", reqId)"))
+        assertFalse("dead result sink removed", src.contains("NativeRecoveryResultSink"))
+        val builders = java.io.File("src/main/java").walkTopDown().filter { it.isFile && it.extension == "kt" }
+            .flatMap { f -> f.readLines().map { it.trim() }.filterNot { it.startsWith("*") || it.startsWith("//") || it.startsWith("/*") }.filter { it.contains("RESULT_EVENT") || it.contains("\"nativeRecoveryResult\"") }.map { f.name + ": " + it } }
+            .filterNot { it.contains("const val RESULT_EVENT") }.toList()
+        assertEquals("only the reqId-carrying builder: $builders", 1, builders.size)
+        assertTrue(builders.single().contains(".put(\"reqId\", reqId)"))
+    }
+
     @Test
     fun backoffCarriesCooldownOnly() {
-        val e = NativeRecoveryFlow.resultEvent(RecoveryOutcome(RecoveryCode.BACKOFF, eoa, 30))
+        val e = NativeRecoveryFlow.resultEvent(7, RecoveryOutcome(RecoveryCode.BACKOFF, eoa, 30))
         assertEquals(30, e.getInt("cooldownSec"))
         assertFalse(e.has("eoa"))
     }

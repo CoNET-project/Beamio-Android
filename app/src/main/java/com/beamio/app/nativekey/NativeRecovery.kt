@@ -8,7 +8,7 @@ import java.lang.ref.WeakReference
  *
  * - The page sends `{type:"nativeRecoveryOpen", reqId}` (no data) on the chat-module channel. The shell answers with an
  *   ack and, when recovery is available, opens the native recovery page. The recovery code is typed only on that page.
- * - When recovery ends, the shell sends `{type:"nativeRecoveryResult", code}` plus the public address (`eoa`, only with
+ * - When recovery ends, the result `{type:"nativeRecoveryResult", reqId, code}` is sent (by the SDK, with the page's reqId) plus the public address (`eoa`, only with
  *   `ok`) or `cooldownSec` (only with `backoff`). Nothing secret goes back to the page.
  * - `nativeRecoveryOpen` is not `nativeImportOpen` (private key import): the two are never mapped onto each other.
  * - The recovery itself (look up and decrypt the record, store the key natively) belongs to the Android SDK. Until the
@@ -119,10 +119,14 @@ object NativeRecoveryFlow {
         cooldownSec = o.cooldownSec?.takeIf { o.code == RecoveryCode.BACKOFF && it in 1..86_400 },
     )
 
-    /** The `nativeRecoveryResult` event payload. */
-    fun resultEvent(o: RecoveryOutcome): JSONObject {
+    /**
+     * The `nativeRecoveryResult` event payload for the page that asked with [reqId] (spec §25.52Y.27, r3na): a result is
+     * never built without the page's reqId. In the shipped builds the SDK sends this event (NativeRecoveryHost.emit, which
+     * always carries reqId); this helper is the shell's own form of the same payload and is used by tests only.
+     */
+    fun resultEvent(reqId: Any, o: RecoveryOutcome): JSONObject {
         val s = sanitize(o)
-        val p = JSONObject().put("type", NativeRecoveryProtocol.RESULT_EVENT).put("code", s.code.wire)
+        val p = JSONObject().put("type", NativeRecoveryProtocol.RESULT_EVENT).put("reqId", reqId).put("code", s.code.wire)
         s.eoa?.let { p.put("eoa", it) }
         s.cooldownSec?.let { p.put("cooldownSec", it) }
         return p
@@ -181,22 +185,3 @@ object NativeRecoveryRoute {
     }
 }
 
-/** Where the recovery page sends its result: MainActivity registers its web dispatcher here. */
-object NativeRecoveryResultSink {
-    private var sink: WeakReference<(JSONObject) -> Unit>? = null
-
-    @Synchronized
-    fun register(s: (JSONObject) -> Unit) {
-        sink = WeakReference(s)
-    }
-
-    @Synchronized
-    fun unregister(s: (JSONObject) -> Unit) {
-        if (sink?.get() === s) sink = null
-    }
-
-    fun deliver(o: RecoveryOutcome) {
-        val s = synchronized(this) { sink?.get() } ?: return
-        s(NativeRecoveryFlow.envelope(NativeRecoveryFlow.resultEvent(o)))
-    }
-}
