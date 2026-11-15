@@ -10,6 +10,12 @@ It provides a fast, optimized WebView container for the Beamio app (website `htt
 
 ---
 
+## ⚠️ Build status: QA SDK pinned
+
+`app/chat-sdk.lock` currently pins a **QA-only** chat SDK (`chat_sdk_qa=true`, 0.2.19-r1841qa). With it, packaging a
+store APK or AAB fails on purpose (`verifyChatSdkNotQaForStore`). Before a formal (store) package, replace the lock with a
+non-QA SDK build (made without `-PchatWalletCredentialQa=true`, `chat_sdk_qa=false`) in its own reviewed commit.
+
 ## 📸 Preview (Placeholder)
 
 

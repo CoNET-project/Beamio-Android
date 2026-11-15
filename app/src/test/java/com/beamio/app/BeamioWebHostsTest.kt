@@ -84,4 +84,15 @@ class BeamioWebHostsTest {
         val h = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(h.indexOf("chatApiBaseFor(") < h.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
     }
+
+    /** PM R2114: the legacy chatModuleSignResponse is gated by the trusted top-level origin, even in a legacy QA probe. */
+    @Test
+    fun legacySignResponseIsOriginGated() {
+        val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
+        val legacy = main.substringAfter("@JavascriptInterface override fun chatModuleSignResponse(json: String) {").substringBefore("\n        }")
+        assertTrue(legacy.contains("if (!ChatOriginGate.allowed(embeddedTopOrigin)) {"))
+        assertTrue(legacy.indexOf("ChatOriginGate.allowed") < legacy.indexOf("super.chatModuleSignResponse(json)"))
+        // README states that the QA lock blocks store packaging until a non-QA SDK and lock replace it.
+        assertTrue(File("../README.md").readText().contains("chat_sdk_qa=false"))
+    }
 }

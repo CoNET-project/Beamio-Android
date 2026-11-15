@@ -3188,7 +3188,17 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface override fun startNativeVoiceMic(): Boolean = super.startNativeVoiceMic()
         @JavascriptInterface override fun stopNativeVoiceMic() = super.stopNativeVoiceMic()
         @JavascriptInterface override fun chatModuleCommand(json: String) = super.chatModuleCommand(json)
-        @JavascriptInterface override fun chatModuleSignResponse(json: String) = super.chatModuleSignResponse(json)
+        // PM R2114: even in an explicit -PlegacySensitiveBridge=true QA probe, a signing reply on this interface is accepted
+        // only when the embedded WebView's top-level page is the trusted local origin (same gate as chatModuleCommand).
+        // Limit: a JavascriptInterface call carries no frame, so a frame inside the trusted page cannot be told apart; the
+        // full main-frame + origin rule exists only on window.BeamioChat (BeamioChatChannel.decide).
+        @JavascriptInterface override fun chatModuleSignResponse(json: String) {
+            if (!ChatOriginGate.allowed(embeddedTopOrigin)) {
+                Log.i(TAG, "legacy chatModuleSignResponse refused: top-level origin not trusted")
+                return
+            }
+            super.chatModuleSignResponse(json)
+        }
     }
 
     private fun applyEmbeddedPwaUpdateFromBridge() {
