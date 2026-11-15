@@ -85,13 +85,17 @@ class BeamioWebHostsTest {
         assertTrue(h.indexOf("chatApiBaseFor(") < h.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
     }
 
-    /** PM R2114: the legacy chatModuleSignResponse is gated by the trusted top-level origin, even in a legacy QA probe. */
+    /** PM R2120: the legacy chatModuleSignResponse never accepts a signing reply, even in a legacy QA probe. */
     @Test
-    fun legacySignResponseIsOriginGated() {
+    fun legacySignResponseIsAlwaysRefused() {
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         val legacy = main.substringAfter("@JavascriptInterface override fun chatModuleSignResponse(json: String) {").substringBefore("\n        }")
-        assertTrue(legacy.contains("if (!ChatOriginGate.allowed(embeddedTopOrigin)) {"))
-        assertTrue(legacy.indexOf("ChatOriginGate.allowed") < legacy.indexOf("super.chatModuleSignResponse(json)"))
+        assertTrue(legacy.contains("legacy chatModuleSignResponse refused"))
+        assertFalse(legacy.contains("super.chatModuleSignResponse"))
+        assertFalse(legacy.contains("fulfillSign"))
+        // BeamioChat still delivers signing replies (main frame + appassets, decided in BeamioChatChannel)
+        assertTrue(main.contains("onSignResponse = { json -> deliverChatSignResponse(json) }"))
+        assertFalse(main.contains("onSignResponse = { json -> jsBridge.chatModuleSignResponse(json) }"))
         // README states that the QA lock blocks store packaging until a non-QA SDK and lock replace it.
         assertTrue(File("../README.md").readText().contains("chat_sdk_qa=false"))
     }

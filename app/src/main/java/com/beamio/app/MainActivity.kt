@@ -1756,10 +1756,7 @@ class MainActivity : ComponentActivity() {
         /** PWA answer to a `chatModuleSignRequest`: `{ reqId, ok, signature?, error? }`. */
         open fun chatModuleSignResponse(json: String) {
             if (shellNoKey("chatModuleSignResponse")) return
-            try {
-                BeamioConetChatModule.fulfillSign(JSONObject(json))
-            } catch (_: Exception) {
-            }
+            fulfillChatSign(json)
         }
 
         @JavascriptInterface
@@ -1827,6 +1824,19 @@ class MainActivity : ComponentActivity() {
             else -> return ack.put("ok", false).put("error", "unknown_command")
         }
         return ack.put("ok", true)
+    }
+
+    /** window.BeamioChat's signing reply (after its origin and main-frame checks): the no-key gate, then the SDK. */
+    private fun deliverChatSignResponse(json: String) {
+        if (shellNoKey("chatModuleSignResponse")) return
+        fulfillChatSign(json)
+    }
+
+    private fun fulfillChatSign(json: String) {
+        try {
+            BeamioConetChatModule.fulfillSign(JSONObject(json))
+        } catch (_: Exception) {
+        }
     }
 
     private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
@@ -3188,16 +3198,11 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface override fun startNativeVoiceMic(): Boolean = super.startNativeVoiceMic()
         @JavascriptInterface override fun stopNativeVoiceMic() = super.stopNativeVoiceMic()
         @JavascriptInterface override fun chatModuleCommand(json: String) = super.chatModuleCommand(json)
-        // PM R2114: even in an explicit -PlegacySensitiveBridge=true QA probe, a signing reply on this interface is accepted
-        // only when the embedded WebView's top-level page is the trusted local origin (same gate as chatModuleCommand).
-        // Limit: a JavascriptInterface call carries no frame, so a frame inside the trusted page cannot be told apart; the
-        // full main-frame + origin rule exists only on window.BeamioChat (BeamioChatChannel.decide).
+        // PM R2120: a JavascriptInterface call carries no frame, so the main-frame + appassets rule of window.BeamioChat
+        // cannot be checked here. Even in an explicit -PlegacySensitiveBridge=true QA probe, a signing reply on this
+        // interface is therefore always refused; signing replies go only through window.BeamioChat (BeamioChatChannel).
         @JavascriptInterface override fun chatModuleSignResponse(json: String) {
-            if (!ChatOriginGate.allowed(embeddedTopOrigin)) {
-                Log.i(TAG, "legacy chatModuleSignResponse refused: top-level origin not trusted")
-                return
-            }
-            super.chatModuleSignResponse(json)
+            Log.i(TAG, "legacy chatModuleSignResponse refused: signing replies only on window.BeamioChat")
         }
     }
 
@@ -3573,7 +3578,9 @@ class MainActivity : ComponentActivity() {
             BeamioChatChannel.attach(
                 this,
                 onCommand = { json, deliver -> handleChatCommand(json, WalletCredentialGate.Channel.WEB_MESSAGE, deliver) },
-                onSignResponse = { json -> jsBridge.chatModuleSignResponse(json) },
+                // PM R2120: signing replies from window.BeamioChat go straight to delivery, never through the (possibly
+                // legacy) CashTreesAndroid bridge object, whose override refuses them.
+                onSignResponse = { json -> deliverChatSignResponse(json) },
             )
             BeamioShellChannel.attach(this) { call -> handleShellCall(jsBridge, call) }
             webViewClient = object : WebViewClient() {
