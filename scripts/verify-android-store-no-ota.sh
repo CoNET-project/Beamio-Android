@@ -6,7 +6,8 @@
 #   scripts/verify-android-store-no-ota.sh [--expect-ota] DEX_DIR|FILE.apk|FILE.aab ...
 #
 # Fails (exit 1) when any dex contains:
-#   - the update manifest / bundle URLs (beamio.app/app/update.json, SilentPassUI-<ver>.zip download base)
+#   - the update manifest URL on the live domain and the old one (beamio.ca/app/update.json since R1626/R2030;
+#     beamio.app/app/update.json kept as a legacy marker)
 #   - the update-available event name (embeddedPwaUpdateAvailable)
 #   - the capability bit (pwa.embedded-ota.v1, __CT_ANDROID_CAPS__)
 #   (A method named applyEmbeddedPwaUpdate is allowed: since N4 the store build has a stub that only answers
@@ -66,6 +67,7 @@ if [[ "$DEX_COUNT" == "0" ]]; then
 fi
 
 STRINGS=(
+	"beamio.ca/app/update.json"
 	"beamio.app/app/update.json"
 	"embeddedPwaUpdateAvailable"
 	"pwa.embedded-ota.v1"

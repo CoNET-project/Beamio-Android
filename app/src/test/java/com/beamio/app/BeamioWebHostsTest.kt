@@ -48,4 +48,21 @@ class BeamioWebHostsTest {
     fun pageOriginIsUnchanged() {
         assertEquals("https://appassets.androidplatform.net", com.beamio.app.embedded.EmbeddedPwaConstants.ASSET_LOADER_ORIGIN)
     }
+
+    /** PM R2030: the store gate looks for the live update URL (beamio.ca), not only the old domain's. */
+    @Test
+    fun storeGateCoversTheLiveUpdateUrl() {
+        val gate = File("../scripts/verify-android-store-no-ota.sh").readText()
+        val strings = gate.substringAfter("STRINGS=(").substringBefore(")")
+        assertTrue(strings.contains("\"beamio.ca/app/update.json\""))
+        assertTrue(strings.contains("\"beamio.app/app/update.json\""))
+    }
+
+    /** PM R2030: no README or main-code link points at the old site as the live app address. */
+    @Test
+    fun readmeNamesTheLiveDomain() {
+        val readme = File("../README.md").readText()
+        assertFalse(readme.contains("https://beamio.app/app"))
+        assertTrue(readme.contains("https://beamio.ca/app"))
+    }
 }

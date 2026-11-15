@@ -1,10 +1,10 @@
-# Beamio Android App (`beamio.app`)
+# Beamio Android App (`beamio.ca`)
 ![Platform](https://img.shields.io/badge/platform-Android-blue.svg)
 ![Language](https://img.shields.io/badge/language-Kotlin-purple.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 The **Beamio Android App** is the official Android wrapper for the Beamio stablecoin wallet ecosystem (USDC on Base L2).  
-It provides a fast, optimized WebView container for `https://beamio.app/app`, enhancing the user experience with native features such as camera access, refined user-agent detection, and Chrome debugging support.
+It provides a fast, optimized WebView container for the Beamio app (website `https://beamio.ca/app`; the shell loads the embedded bundle locally), enhancing the user experience with native features such as camera access, refined user-agent detection, and Chrome debugging support.
 
 > 🚀 **Goal:** Deliver a frictionless, WeChat-Pay-level experience for stablecoin payments, USD settlement, merchant checkout, and cross-border usage — with zero onboarding friction.
 
