@@ -248,6 +248,51 @@ object WalletCredentialGate {
     fun refusal(reqId: Any?, error: String): JSONObject =
         JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", false).put("error", error)
 
+    // ---- window channel (BeamioShellRecord): walletEoaAddress / walletCredential (PM R1911) ----
+
+    /** [reply] goes to the page; [logs] are names, verdicts, codes and durations only. */
+    class WindowResult(val reply: String, val logs: List<String>)
+
+    /**
+     * The window-channel path of a gated command (the SDK answers walletEoaAddress on the window channel, behind the same
+     * boundary as shellRecord: PM R1911, SDK 1b33f00). Shell side, in order: reqId; trust [verdict] (manifest bit,
+     * native declaration, verified bundle, origin, main frame: §25.52Y.42 item 5 (d) = §25.52Y.38 item 2); request shape
+     * and key fields; then [sdk]; then the reply check (walletCredential eoa_key -> unavailable, W-L5; otherwise
+     * [responseAllowed] for the command, else key_over_bridge_refused). Refusals use `{type:"ack", reqId, ok:false, error}`
+     * (the SDK's own window-channel shape for these commands). [sdk] runs only for a trusted, well-formed request.
+     */
+    fun windowCredential(body: JSONObject, verdict: () -> Verdict, sdk: () -> String, clock: () -> Long): WindowResult {
+        val started = clock()
+        val command = body.optString("type")
+        val rid = BridgeReqId.valid(body.opt("reqId"))
+        val logs = mutableListOf<String>()
+        fun done(ev: JSONObject, raw: String? = null, names: List<String> = emptyList()): WindowResult {
+            logs += replyLine(command, ev, clock() - started, names) // log point 2
+            return WindowResult(raw ?: ev.toString(), logs)
+        }
+        if (rid == null) return done(refusal(null, BAD_REQUEST))
+        return try {
+            val v = verdict()
+            logs += entryLine(command, rid, v) // log point 1
+            when (val c = checkRequest(body, v)) {
+                is RequestCheck.Refuse -> done(refusal(c.reqId, c.error), names = c.fieldNames)
+                RequestCheck.Pass -> {
+                    val raw = sdk()
+                    val ev = runCatching { JSONObject(raw) }.getOrNull() ?: return done(refusal(rid, UNAVAILABLE))
+                    when {
+                        command == COMMAND && eoaKeyReply(ev) -> done(refusal(rid, UNAVAILABLE))
+                        BridgeReqId.valid(ev.opt("reqId")) != rid -> done(refusal(rid, UNAVAILABLE))
+                        !responseAllowed(ev, command) -> done(refusal(rid, KEY_OVER_BRIDGE_REFUSED))
+                        else -> done(ev, raw)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logs += errorLine(command, rid, e) // log point 3
+            done(refusal(rid, UNAVAILABLE))
+        }
+    }
+
     // ---- log lines (§25.52Y.38 item 11 (c) points 1-3) ----
 
     /** Point 1, request entry: command name, reqId, origin/trust verdict. */

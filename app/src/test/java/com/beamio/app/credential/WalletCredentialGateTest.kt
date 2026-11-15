@@ -231,6 +231,55 @@ class WalletCredentialGateTest {
         assertFalse("address not logged", ok.logLine!!.contains(testEoa))
     }
 
+    // ---- window channel (PM R1911; SDK answers walletEoaAddress on BeamioShellRecord) ----
+
+    @Test
+    fun windowChannelGatesWalletEoaAddressBeforeAndAfterTheSdk() {
+        var calls = 0
+        fun run(body: JSONObject, v: Verdict, reply: String): JSONObject {
+            val r = WalletCredentialGate.windowCredential(body, { v }, { calls++; reply }, { 0L })
+            for (l in r.logs) for (secret in listOf(testEoa, testKey, words)) assertFalse("$l has $secret", l.contains(secret))
+            return JSONObject(r.reply)
+        }
+        val okReply = ack(JSONObject().put("eoa", testEoa)).put("reqId", 8).toString()
+        // untrusted: not_trusted, the SDK is not called
+        for (v in Verdict.values().filter { it != Verdict.TRUSTED }) assertEquals("not_trusted", run(addrReq(), v, okReply).getString("error"))
+        assertEquals(0, calls)
+        // malformed: refused before the SDK
+        assertEquals("bad_request", run(addrReq("extra" to 1), Verdict.TRUSTED, okReply).getString("error"))
+        assertEquals("key_over_bridge_refused", run(addrReq("eoaPrivateKey" to testKey), Verdict.TRUSTED, okReply).getString("error"))
+        assertEquals("bad_request", run(JSONObject().put("type", "walletEoaAddress").put("reqId", -1), Verdict.TRUSTED, okReply).getString("error"))
+        assertEquals(0, calls)
+        // trusted: the SDK's {eoa} passes unchanged
+        val ok = run(addrReq(), Verdict.TRUSTED, okReply)
+        assertEquals(testEoa, ok.getJSONObject("result").getString("eoa")); assertEquals(1, calls)
+        // SDK failures pass as failures (1b33f00 today answers unknown_command on this channel)
+        assertEquals("unknown_command", run(addrReq(), Verdict.TRUSTED, JSONObject().put("reqId", 8).put("ok", false).put("error", "unknown_command").toString()).getString("error"))
+        assertEquals("no_key", run(addrReq(), Verdict.TRUSTED, JSONObject().put("type", "ack").put("reqId", 8).put("ok", false).put("error", "no_key").toString()).getString("error"))
+        // a reply with more than the address, another reqId, or not JSON never reaches the page
+        assertEquals("key_over_bridge_refused", run(addrReq(), Verdict.TRUSTED, ack(JSONObject().put("eoa", testEoa).put("eoaPrivateKey", testKey)).put("reqId", 8).toString()).getString("error"))
+        assertEquals("unavailable", run(addrReq(), Verdict.TRUSTED, ack(JSONObject().put("eoa", testEoa)).put("reqId", 9).toString()).getString("error"))
+        assertEquals("unavailable", run(addrReq(), Verdict.TRUSTED, "not json").getString("error"))
+        // walletCredential on this channel: eoa_key -> unavailable (W-L5)
+        assertEquals("unavailable", run(req(), Verdict.TRUSTED, ack(JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey)).toString()).getString("error"))
+        // an exception in the SDK call: unavailable, error line with the class name only
+        val r = WalletCredentialGate.windowCredential(addrReq(), { Verdict.TRUSTED }, { throw IllegalStateException("x $testEoa") }, { 0L })
+        assertEquals("unavailable", JSONObject(r.reply).getString("error"))
+        assertTrue(r.logs.any { it.startsWith("error cmd=walletEoaAddress") }); assertFalse(r.logs.any { it.contains(testEoa) })
+    }
+
+    @Test
+    fun windowChannelWiring() {
+        val src = File("src/main/java/com/beamio/app/legacy/ShellRecordChannel.kt").readText()
+        val route = src.indexOf("body!!.optString(\"type\") in WalletCredentialGate.GATED_COMMANDS")
+        assertTrue(route > 0)
+        // full trust (capability required: default) and the SDK call only inside the gate
+        assertTrue(src.contains("verdict = { ShellCredentialTrust.verdict(WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin) }"))
+        assertTrue(src.contains("sdk = { handler.handle(embedded, data, size) }"))
+        // the PGP exit assertion still runs on whatever the path produced
+        assertTrue(src.indexOf("LegacyRecord.pgpPrivateHits(out.toCharArray())") > route)
+    }
+
     // ---- other commands (item 14); W-N1, W-N2 ----
 
     @Test

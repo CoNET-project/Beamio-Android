@@ -83,8 +83,21 @@ object ShellRecordChannel {
             worker.execute {
                 val started = SystemClock.elapsedRealtime()
                 // Unparsable JSON never reaches the SDK (AX.1); unknown types and bad reqIds are answered by the SDK handler.
-                val parsed = runCatching { org.json.JSONObject(data) }.isSuccess
+                val body = runCatching { org.json.JSONObject(data) }.getOrNull()
+                val parsed = body != null
                 var out = if (!parsed) BAD_REQUEST
+                else if (body!!.optString("type") in WalletCredentialGate.GATED_COMMANDS) {
+                    // PM R1911: walletEoaAddress (and later walletCredential) is answered by the SDK on this window channel.
+                    // Shell gate before and after the SDK call; logs: names, verdict, code, ms only (log points 1-3).
+                    val w = WalletCredentialGate.windowCredential(
+                        body,
+                        verdict = { ShellCredentialTrust.verdict(WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin) },
+                        sdk = { handler.handle(embedded, data, size) },
+                        clock = { SystemClock.elapsedRealtime() },
+                    )
+                    w.logs.forEach { log(it) }
+                    w.reply
+                }
                 else try { handler.handle(embedded, data, size) } catch (e: Exception) { ShellRecordReplies.fallback(data) }
                 val hits = LegacyRecord.pgpPrivateHits(out.toCharArray())
                 if (hits != 0) { log("channel exit assert FAIL pgpPrivateHits=$hits"); out = ShellRecordReplies.fallback(data) }
