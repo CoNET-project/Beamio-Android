@@ -10,13 +10,12 @@ import org.junit.Test
 
 /** window.BeamioShellRecord shell fallbacks (spec r3ef §25.52CF, r3eg §25.52CH) and reqId rules (§25.52AW.1). */
 class WindowChannelFallbackTest {
-    /** Spec r3ef §25.52CF.3 / r3eg §25.52CH: one answer, reqId echoed, business-level for read and write. */
+    /** Spec r3ef §25.52CF.3 / r3eg §25.52CH: one answer, reqId echoed. r3ok: read's record_unreadable is envelope-level. */
     @Test
     fun windowChannelFallbacksFollowCf() {
         val r = JSONObject(ShellRecordReplies.fallback("{\"type\":\"shellRecordRead\",\"reqId\":7}"))
-        assertEquals("ack", r.getString("type")); assertEquals(7, r.getInt("reqId")); assertTrue(r.getBoolean("ok"))
-        assertEquals("error", r.getJSONObject("result").getString("code")); assertEquals("record_unreadable", r.getJSONObject("result").getString("sub"))
-        assertFalse(r.getJSONObject("result").has("rev") || r.getJSONObject("result").has("record"))
+        assertEquals("ack", r.getString("type")); assertEquals(7, r.getInt("reqId")); assertFalse(r.getBoolean("ok"))
+        assertEquals("record_unreadable", r.getString("error")); assertFalse(r.has("result"))
         val w = JSONObject(ShellRecordReplies.fallback("{\"type\":\"shellRecordWrite\",\"reqId\":\"w1\",\"record\":{}}"))
         assertEquals("w1", w.getString("reqId")); assertTrue(w.getBoolean("ok")); assertEquals("write_failed", w.getJSONObject("result").getString("code"))
         assertEquals(1, w.getJSONObject("result").length())

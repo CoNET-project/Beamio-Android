@@ -91,7 +91,12 @@ object ShellRecordChannel {
                     // Shell gate before and after the SDK call; logs: names, verdict, code, ms only (log points 1-3).
                     val w = WalletCredentialGate.windowCredential(
                         body,
-                        verdict = { ShellCredentialTrust.verdict(WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin) },
+                        verdict = {
+                            ShellCredentialTrust.verdict(
+                                WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin,
+                                requireCapability = WalletCredentialGate.requiresCapability(body.optString("type")),
+                            )
+                        },
                         sdk = { handler.handle(embedded, data, size) },
                         clock = { SystemClock.elapsedRealtime() },
                     )
@@ -131,7 +136,8 @@ internal object ShellRecordReplies {
     /**
      * Spec r3ef §25.52CF: the shell's answer when the SDK handler throws or its reply fails the exit assertion. Exactly one,
      * the request's reqId echoed, no rev, record, exception text or content.
-     * - shellRecordRead:  {type:"ack", reqId, ok:true, result:{code:"error", sub:"record_unreadable"}}
+     * - shellRecordRead:  {type:"ack", reqId, ok:false, error:"record_unreadable"} (r3ok §25.52D.6 note: an `error` + X code is
+     *   envelope-level, never in result.code)
      * - shellRecordWrite: {type:"ack", reqId, ok:true, result:{code:"write_failed"}} (the page reads rev back before retrying)
      * - an invalid reqId never takes the fallback: {type:"ack", reqId:null, ok:false, error:"bad_request"}
      * - any other type: {type:"ack", reqId, ok:false, error:"unknown_command"} (AU.1)
@@ -140,7 +146,7 @@ internal object ShellRecordReplies {
         val obj = runCatching { org.json.JSONObject(data) }.getOrNull()
         val reqId = obj?.let { validReqId(it) } ?: return envelope(null, "bad_request")
         return when (obj.optString("type")) {
-            "shellRecordRead" -> ack(reqId).put("ok", true).put("result", org.json.JSONObject().put("code", "error").put("sub", "record_unreadable")).toString()
+            "shellRecordRead" -> envelope(reqId, "record_unreadable")
             "shellRecordWrite" -> ack(reqId).put("ok", true).put("result", org.json.JSONObject().put("code", "write_failed")).toString()
             else -> envelope(reqId, "unknown_command")
         }

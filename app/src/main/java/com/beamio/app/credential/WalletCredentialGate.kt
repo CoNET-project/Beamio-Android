@@ -164,12 +164,14 @@ object WalletCredentialGate {
 
     /**
      * W-L5 on the shell side (PM R1904; r3oh §25.52Y.38 item 8 (8e)): a walletCredential ack with
-     * `credentialKind = "eoa_key"` or an `eoaPrivateKey` field anywhere becomes `unavailable`, never reaching the page,
-     * whatever the SDK did.
+     * `credentialKind = "eoa_key"`, or an `eoaPrivateKey` field with no `mnemonic`, becomes `unavailable`, never reaching
+     * the page, whatever the SDK did.
      */
     fun eoaKeyReply(event: JSONObject): Boolean =
         event.optJSONObject("result")?.optString("credentialKind") == "eoa_key" ||
-            keyFieldNames(event, setOf("eoaprivatekey")).isNotEmpty()
+            (keyFieldNames(event, setOf("eoaprivatekey")).isNotEmpty() && keyFieldNames(event, setOf("mnemonic")).isEmpty())
+    // A reply with both mnemonic and eoaPrivateKey is W-N3, not W-L5: it fails responseAllowed and answers
+    // key_over_bridge_refused (§25.52Y.38 item 3 (c); reviewer on 0cd8bdf7; same as the iOS shell).
 
     // ---- other commands (§25.52Y.38 item 14: rules unchanged, walletCredential is the single exception) ----
 
@@ -238,12 +240,16 @@ object WalletCredentialGate {
     class ShellRecordGateResult(val reply: String, val verdict: Verdict?, val wFields: List<String>)
 
     /**
-     * The shellRecordRead answer for logical not_trusted, in the read-back's own shape (§25.52D.6 code in `result.code`, as
-     * the existing record_unreadable fallback): `{type:"ack", reqId, ok:true, result:{code:"origin_refused"}}`. No record.
+     * The shellRecordRead answer for logical not_trusted: the envelope-level error `{type:"ack", reqId, ok:false,
+     * error:"origin_refused"}` (r3ok §25.52D.6 note, §25.52AB.3, §25.52CJ.3), never inside `result.code`. No record.
      */
-    fun shellRecordRefusal(reqId: Any?): String =
-        JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", true)
-            .put("result", JSONObject().put("code", SHELL_RECORD_ORIGIN_REFUSED)).toString()
+    fun shellRecordRefusal(reqId: Any?): String = refusal(reqId, SHELL_RECORD_ORIGIN_REFUSED).toString()
+
+    /**
+     * r3ok / PM R1912 (§25.52Y.42 item 5 (d)): walletEoaAddress checks origin, main frame and the bundle hash only, no
+     * capability bit; walletCredential keeps the dual capability check (§25.52Y.38 item 2).
+     */
+    fun requiresCapability(command: String): Boolean = command != ADDRESS_COMMAND
 
     fun refusal(reqId: Any?, error: String): JSONObject =
         JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", false).put("error", error)

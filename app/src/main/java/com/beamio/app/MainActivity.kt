@@ -1898,7 +1898,10 @@ class MainActivity : ComponentActivity() {
             try {
                 // BeamioChatChannel.decide only lets main-frame messages from the trusted origin become a Command.
                 val web = channel == WalletCredentialGate.Channel.WEB_MESSAGE
-                val verdict = ShellCredentialTrust.verdict(channel, isMainFrame = web, sourceOrigin = if (web) ChatOriginGate.TRUSTED else embeddedTopOrigin)
+                val verdict = ShellCredentialTrust.verdict(
+                    channel, isMainFrame = web, sourceOrigin = if (web) ChatOriginGate.TRUSTED else embeddedTopOrigin,
+                    requireCapability = WalletCredentialGate.requiresCapability(command),
+                )
                 Log.i(CREDENTIAL_TAG, WalletCredentialGate.entryLine(command, rid, verdict)) // log point 1
                 when (val c = WalletCredentialGate.checkRequest(body, verdict)) {
                     is WalletCredentialGate.RequestCheck.Refuse -> {
