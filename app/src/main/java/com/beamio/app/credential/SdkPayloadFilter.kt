@@ -15,24 +15,26 @@ import java.util.concurrent.ConcurrentHashMap
  * [Result.logLine] holds names, codes and durations only.
  */
 class SdkPayloadFilter(private val clock: () -> Long) {
-    private val pending = ConcurrentHashMap<String, Long>()
+    private class Pending(val command: String, val startedMs: Long)
+    private val pending = ConcurrentHashMap<String, Pending>()
 
     class Result(val payload: JSONObject?, val credentialReply: Boolean, val logLine: String?)
 
-    fun expectCredentialReply(reqId: Any) { pending[key(reqId)] = clock() }
+    /** [command] is walletCredential or walletEoaAddress (WalletCredentialGate.GATED_COMMANDS). */
+    fun expectCredentialReply(reqId: Any, command: String = WalletCredentialGate.COMMAND) { pending[key(reqId)] = Pending(command, clock()) }
     fun cancel(reqId: Any) { pending.remove(key(reqId)) }
 
     fun filter(payload: JSONObject): Result {
         val e = payload.optJSONObject("event")
         val rid = e?.let { BridgeReqId.valid(it.opt("reqId")) }
-        val started = if (e != null && rid != null && e.optString("type") == "ack") pending.remove(key(rid)) else null
-        if (started != null) {
-            val ms = clock() - started
-            if (!WalletCredentialGate.responseAllowed(e!!)) {
+        val p = if (e != null && rid != null && e.optString("type") == "ack") pending.remove(key(rid)) else null
+        if (p != null) {
+            val ms = clock() - p.startedMs
+            if (!WalletCredentialGate.responseAllowed(e!!, p.command)) {
                 val refused = WalletCredentialGate.refusal(rid, WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED)
-                return Result(event(refused), true, WalletCredentialGate.replyLine(WalletCredentialGate.COMMAND, refused, ms) + " sdkReplyRefused=true")
+                return Result(event(refused), true, WalletCredentialGate.replyLine(p.command, refused, ms) + " sdkReplyRefused=true")
             }
-            return Result(payload, true, WalletCredentialGate.replyLine(WalletCredentialGate.COMMAND, e, ms))
+            return Result(payload, true, WalletCredentialGate.replyLine(p.command, e, ms))
         }
         val hits = WalletCredentialGate.otherCommandPayloadKeyFields(payload)
         if (hits.isEmpty()) return Result(payload, false, null)

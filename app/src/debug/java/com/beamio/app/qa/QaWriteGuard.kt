@@ -168,6 +168,7 @@ object QaWriteGuard {
         "hello", "walletStatus", "identityPublic", "destroy", "pgpRestoreEvaluate",
         "nativeRecoveryOpen", "nativeImportOpen", "nativeAccountCreateOpen",
         "walletCredential", // spec r3np §25.52Y.38: read-only, local; the shell trust gate runs before this guard
+        "walletEoaAddress", // spec §25.52Y.42 item 5 (c): address only, read-only, local; same shell trust gate
     )
 
     /** true = forward to the SDK. Always true outside guard builds. */

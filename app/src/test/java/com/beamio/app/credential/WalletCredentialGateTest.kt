@@ -122,7 +122,6 @@ class WalletCredentialGateTest {
     @Test
     fun replyWithExactlyOneCredentialPasses() {
         assertTrue(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words))))
-        assertTrue(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey))))
         assertTrue(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words).put("blob", "c2VhbGVk"))))
         assertTrue(WalletCredentialGate.responseAllowed(ack(null)))
         // 930988d does not know the command yet: unknown_command passes as a plain failure.
@@ -151,11 +150,54 @@ class WalletCredentialGateTest {
             JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words.uppercase()),
             JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words).put("pgpPrivateKeyArmored", "x"),
             JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey.drop(2)),
+            // PM R1884 / §25.52Y.42 item 5 (b): an eoa_key account answers unavailable; a key reply never passes
+            JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey),
             JSONObject().put("credentialKind", "mnemonic").put("mnemonic", words),
         )
         for (c in cases) assertFalse(c.toString(), WalletCredentialGate.responseAllowed(ack(c)))
         // a failure carrying a key field anywhere
         assertFalse(WalletCredentialGate.responseAllowed(JSONObject().put("type", "ack").put("reqId", 7).put("ok", false).put("error", "x").put("mnemonic", words)))
+    }
+
+    // ---- walletEoaAddress (§25.52Y.42 item 5 (c)(d); PM R1896 (3)) ----
+
+    private fun addrReq(vararg kv: Pair<String, Any>) = JSONObject().put("type", "walletEoaAddress").put("reqId", 8).apply { kv.forEach { put(it.first, it.second) } }
+
+    @Test
+    fun eoaAddressRequestTakesTheSameGateAndOnlyTypeAndReqId() {
+        assertTrue(WalletCredentialGate.ADDRESS_COMMAND in WalletCredentialGate.GATED_COMMANDS)
+        assertTrue(WalletCredentialGate.checkRequest(addrReq(), Verdict.TRUSTED) is RequestCheck.Pass)
+        for (v in Verdict.values().filter { it != Verdict.TRUSTED }) {
+            assertEquals(WalletCredentialGate.NOT_TRUSTED, (WalletCredentialGate.checkRequest(addrReq(), v) as RequestCheck.Refuse).error)
+        }
+        assertEquals(WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED, (WalletCredentialGate.checkRequest(addrReq("eoaPrivateKey" to testKey), Verdict.TRUSTED) as RequestCheck.Refuse).error)
+        for (bad in listOf(addrReq("mode" to "unseal", "blob" to "x"), addrReq("extra" to 1))) {
+            assertEquals(WalletCredentialGate.BAD_REQUEST, (WalletCredentialGate.checkRequest(bad, Verdict.TRUSTED) as RequestCheck.Refuse).error)
+        }
+    }
+
+    @Test
+    fun eoaAddressReplyCarriesOnlyEoa() {
+        val a = WalletCredentialGate.ADDRESS_COMMAND
+        assertTrue(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa)), a))
+        assertTrue(WalletCredentialGate.responseAllowed(ack(null), a)) // unavailable / no_key / locked
+        for (bad in listOf(
+            JSONObject().put("eoa", testEoa).put("eoaPrivateKey", testKey),
+            JSONObject().put("eoa", testEoa).put("mnemonic", words),
+            JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key"),
+            JSONObject().put("eoa", "0x1234"),
+            JSONObject(),
+        )) assertFalse(bad.toString(), WalletCredentialGate.responseAllowed(ack(bad), a))
+        // the filter applies the address rule to an address reqId, and logs the address command name
+        val f = SdkPayloadFilter { 0L }
+        f.expectCredentialReply(7, a)
+        val r = f.filter(SdkPayloadFilter.event(ack(JSONObject().put("eoa", testEoa).put("mnemonic", words))))
+        assertEquals(WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED, r.payload!!.getJSONObject("event").getString("error"))
+        assertTrue(r.logLine!!.startsWith("reply cmd=walletEoaAddress")); assertFalse(r.payload.toString().contains(words))
+        f.expectCredentialReply(7, a)
+        val ok = f.filter(SdkPayloadFilter.event(ack(JSONObject().put("eoa", testEoa))))
+        assertTrue(ok.credentialReply); assertEquals(testEoa, ok.payload!!.getJSONObject("event").getJSONObject("result").getString("eoa"))
+        assertFalse("address not logged", ok.logLine!!.contains(testEoa))
     }
 
     // ---- other commands (item 14); W-N1, W-N2 ----
@@ -278,10 +320,11 @@ class WalletCredentialGateTest {
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(main.contains("onCommand = { json, deliver -> handleChatCommand(json, WalletCredentialGate.Channel.WEB_MESSAGE, deliver) }"))
         assertTrue(main.contains("handleChatCommand(json, WalletCredentialGate.Channel.JS_INTERFACE) { payload ->"))
-        assertTrue(main.contains("WalletCredentialGate.entryLine(WalletCredentialGate.COMMAND, rid, verdict)) // log point 1"))
-        assertEquals(2, Regex("WalletCredentialGate.replyLine\\(WalletCredentialGate.COMMAND, refused").findAll(main).count() +
+        assertTrue(main.contains("WalletCredentialGate.entryLine(command, rid, verdict)) // log point 1"))
+        assertTrue(main.contains("if (body.optString(\"type\") in WalletCredentialGate.GATED_COMMANDS) {"))
+        assertEquals(2, Regex("WalletCredentialGate.replyLine\\(command, refused").findAll(main).count() +
             Regex("r.logLine\\?.let \\{ Log.i\\(CREDENTIAL_TAG, it\\) \\} // log point 2").findAll(main).count())
-        assertTrue(main.contains("WalletCredentialGate.errorLine(WalletCredentialGate.COMMAND, rid, e)) // log point 3"))
+        assertTrue(main.contains("WalletCredentialGate.errorLine(command, rid, e)) // log point 3"))
         // every credential-tag log line is built from names, codes, verdicts and durations only
         Regex("Log\\.[iwe]\\(CREDENTIAL_TAG, ([^\\n]*)").findAll(main).forEach { m ->
             val arg = m.groupValues[1]

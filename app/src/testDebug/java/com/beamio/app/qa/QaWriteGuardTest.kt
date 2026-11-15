@@ -135,5 +135,6 @@ class QaWriteGuardTest {
         assertTrue(main.indexOf("QaWriteGuard.sdkCommandAllowed") < main.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
         // r3np: walletCredential (read-only, local) is forwarded in guard builds only after the shell trust gate
         assertTrue("walletCredential" in allowed)
+        assertTrue("walletEoaAddress" in allowed)
     }
 }

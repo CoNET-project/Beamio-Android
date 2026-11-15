@@ -1844,7 +1844,7 @@ class MainActivity : ComponentActivity() {
         // QA DIAG (debug only): command type and reqId only; never other fields.
         if (BuildConfig.DEBUG) android.util.Log.i("BeamioQaBridge", "cmd type=${body.optString("type")} reqId=${body.opt("reqId")}")
         // Spec r3np §25.52Y.38: walletCredential has its own path (trust gate, request and reply checks, redacted logs).
-        if (body.optString("type") == WalletCredentialGate.COMMAND) {
+        if (body.optString("type") in WalletCredentialGate.GATED_COMMANDS) {
             handleWalletCredential(body, channel, deliver)
             return
         }
@@ -1892,30 +1892,31 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleWalletCredential(body: JSONObject, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
         val rid = BridgeReqId.valid(body.opt("reqId"))
+        val command = body.optString("type") // walletCredential or walletEoaAddress (GATED_COMMANDS)
         val started = SystemClock.elapsedRealtime()
         credentialWorker.execute {
             try {
                 // BeamioChatChannel.decide only lets main-frame messages from the trusted origin become a Command.
                 val web = channel == WalletCredentialGate.Channel.WEB_MESSAGE
                 val verdict = ShellCredentialTrust.verdict(channel, isMainFrame = web, sourceOrigin = if (web) ChatOriginGate.TRUSTED else embeddedTopOrigin)
-                Log.i(CREDENTIAL_TAG, WalletCredentialGate.entryLine(WalletCredentialGate.COMMAND, rid, verdict)) // log point 1
+                Log.i(CREDENTIAL_TAG, WalletCredentialGate.entryLine(command, rid, verdict)) // log point 1
                 when (val c = WalletCredentialGate.checkRequest(body, verdict)) {
                     is WalletCredentialGate.RequestCheck.Refuse -> {
                         val refused = WalletCredentialGate.refusal(c.reqId, c.error)
-                        Log.i(CREDENTIAL_TAG, WalletCredentialGate.replyLine(WalletCredentialGate.COMMAND, refused, SystemClock.elapsedRealtime() - started, c.fieldNames)) // log point 2
+                        Log.i(CREDENTIAL_TAG, WalletCredentialGate.replyLine(command, refused, SystemClock.elapsedRealtime() - started, c.fieldNames)) // log point 2
                         deliver(chatEvent(refused))
                     }
                     WalletCredentialGate.RequestCheck.Pass -> {
-                        if (!QaWriteGuard.sdkCommandAllowed(WalletCredentialGate.COMMAND)) {
+                        if (!QaWriteGuard.sdkCommandAllowed(command)) {
                             deliver(chatEvent(WalletCredentialGate.refusal(rid, "qa_write_blocked")))
                             return@execute
                         }
-                        sdkPayloadFilter.expectCredentialReply(rid!!)
+                        sdkPayloadFilter.expectCredentialReply(rid!!, command)
                         BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
                     }
                 }
             } catch (e: Exception) {
-                Log.w(CREDENTIAL_TAG, WalletCredentialGate.errorLine(WalletCredentialGate.COMMAND, rid, e)) // log point 3
+                Log.w(CREDENTIAL_TAG, WalletCredentialGate.errorLine(command, rid, e)) // log point 3
                 rid?.let { sdkPayloadFilter.cancel(it) }
                 deliver(chatEvent(WalletCredentialGate.refusal(rid, "unavailable")))
             }

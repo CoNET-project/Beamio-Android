@@ -15,6 +15,10 @@ import org.json.JSONObject
  */
 object WalletCredentialGate {
     const val COMMAND = "walletCredential"
+    /** Spec r3nw/r3ob §25.52Y.42 item 5 (c)(d): address only, same trust gate (PM R1884, R1896 (3)). */
+    const val ADDRESS_COMMAND = "walletEoaAddress"
+    /** The commands that take this shell path. */
+    val GATED_COMMANDS: Set<String> = setOf(COMMAND, ADDRESS_COMMAND)
     const val CAPABILITY = "wallet.credential.v1"
     const val SHELL_RECORD_READ = "shellRecordRead"
 
@@ -110,8 +114,8 @@ object WalletCredentialGate {
     }
 
     /**
-     * Shell checks of one walletCredential request, before the SDK: reqId, trust, key fields, then the field shape.
-     * [verdict] is [evaluate] for this request.
+     * Shell checks of one walletCredential or walletEoaAddress request, before the SDK: reqId, trust, key fields, then the
+     * field shape (walletEoaAddress takes only `{type, reqId}`). [verdict] is [evaluate] for this request.
      */
     fun checkRequest(body: JSONObject, verdict: Verdict): RequestCheck {
         val reqId = BridgeReqId.valid(body.opt("reqId")) ?: return RequestCheck.Refuse(null, BAD_REQUEST)
@@ -120,6 +124,7 @@ object WalletCredentialGate {
         if (keyHits.isNotEmpty()) return RequestCheck.Refuse(reqId, KEY_OVER_BRIDGE_REFUSED, keyHits)
         val names = body.keys().asSequence().toSet()
         val shapeOk = when {
+            body.optString("type") == ADDRESS_COMMAND -> names == REQUEST_FIELDS
             !body.has("mode") -> names == REQUEST_FIELDS
             else -> names == UNSEAL_FIELDS && body.opt("mode") == "unseal" && (body.opt("blob") as? String)?.isNotEmpty() == true
         }
@@ -130,31 +135,28 @@ object WalletCredentialGate {
     // ---- response (§25.52Y.38 item 3 (e), item 12 (c), item 14 W-N3) ----
 
     private val EOA = Regex("^0x[0-9a-f]{40}$")
-    private val EOA_KEY = Regex("^0x[0-9a-f]{64}$")
     private val MNEMONIC = Regex("^[a-z]+( [a-z]+){11}$|^[a-z]+( [a-z]+){23}$")
     private val RESULT_MNEMONIC = setOf("eoa", "credentialKind", "mnemonic")
-    private val RESULT_EOA_KEY = setOf("eoa", "credentialKind", "eoaPrivateKey")
 
     /**
-     * The SDK's walletCredential ack as it may go to the page, or null when it must be replaced by
+     * Whether the SDK's ack for [command] may go to the page as is; when false it is replaced by
      * `{type:"ack", reqId, ok:false, error:"key_over_bridge_refused"}` (no field of it passes).
-     * A failure ack passes only without a result and with no key field; a success ack carries exactly one credential.
+     * A failure ack passes only without a result and with no key field.
+     * walletCredential success: the mnemonic path only (PM R1884; §25.52Y.42 item 5 (b): an eoa_key account answers
+     * `unavailable`, so a reply with `eoaPrivateKey` never passes). walletEoaAddress success: `result` is exactly `{eoa}`.
      */
-    fun responseAllowed(event: JSONObject): Boolean {
+    fun responseAllowed(event: JSONObject, command: String = COMMAND): Boolean {
         if (event.optString("type") != "ack") return keyFieldNames(event, KEY_FIELDS).isEmpty()
         if (event.opt("ok") != true) return !event.has("result") && keyFieldNames(event, KEY_FIELDS).isEmpty()
         val r = event.optJSONObject("result") ?: return false
         val outside = JSONObject(event.toString()).apply { remove("result") }
         if (keyFieldNames(outside, KEY_FIELDS).isNotEmpty()) return false
         val names = r.keys().asSequence().toSet()
+        if (!EOA.matches(r.optString("eoa"))) return false
+        if (command == ADDRESS_COMMAND) return names == setOf("eoa")
         val core = names - "blob"
         if ("blob" in names && r.opt("blob") !is String) return false
-        if (!EOA.matches(r.optString("eoa"))) return false
-        return when (r.optString("credentialKind")) {
-            "mnemonic" -> core == RESULT_MNEMONIC && MNEMONIC.matches(r.optString("mnemonic"))
-            "eoa_key" -> core == RESULT_EOA_KEY && EOA_KEY.matches(r.optString("eoaPrivateKey"))
-            else -> false
-        }
+        return r.optString("credentialKind") == "mnemonic" && core == RESULT_MNEMONIC && MNEMONIC.matches(r.optString("mnemonic"))
     }
 
     // ---- other commands (§25.52Y.38 item 14: rules unchanged, walletCredential is the single exception) ----
