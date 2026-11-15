@@ -241,7 +241,10 @@ object WalletCredentialGate {
         if (names.isEmpty()) return ShellRecordGateResult(reply, null, names)
         val v = verdict() // evaluated only when W fields would go out (hashing active/ is the costly step)
         if (v == Verdict.TRUSTED) return ShellRecordGateResult(reply, v, names)
-        return ShellRecordGateResult(shellRecordRefusal(BridgeReqId.fromJsonText(request)), v, names)
+        // r3os: source/frame mismatch -> origin_refused; an allowed source whose bundle check fails -> not_trusted.
+        val rid = BridgeReqId.fromJsonText(request)
+        val out = if (v in SOURCE_REFUSALS) shellRecordRefusal(rid) else refusal(rid, NOT_TRUSTED).toString()
+        return ShellRecordGateResult(out, v, names)
     }
 
     /** [reply] goes to the page; [verdict] is null when no W field was involved; [wFields] are names only. */
@@ -252,6 +255,22 @@ object WalletCredentialGate {
      * error:"origin_refused"}` (r3ok §25.52D.6 note, §25.52AB.3, §25.52CJ.3), never inside `result.code`. No record.
      */
     fun shellRecordRefusal(reqId: Any?): String = refusal(reqId, SHELL_RECORD_ORIGIN_REFUSED).toString()
+
+    /** r3oo storage-error shape for an exception in the read-back gate: `{ok:true, result:{code:"error", sub:"record_unreadable"}}`. */
+    fun shellRecordUnreadable(reqId: Any?): String =
+        JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", true)
+            .put("result", JSONObject().put("code", "error").put("sub", "record_unreadable")).toString()
+
+    /**
+     * r3os: the window channel's first check, before JSON parsing or anything else: a message that is not from the main
+     * frame of the allowed origin answers origin_refused exactly once (reqId echoed when the text is JSON with a valid
+     * reqId, else null). Null when the source is allowed.
+     */
+    fun windowSourceRefusal(data: String?, isMainFrame: Boolean, sourceOrigin: String?): String? {
+        val origin = ChatOriginGate.originOf(sourceOrigin) ?: sourceOrigin?.trimEnd('/')
+        if (isMainFrame && origin == ChatOriginGate.TRUSTED) return null
+        return shellRecordRefusal(data?.let { BridgeReqId.fromJsonText(it) })
+    }
 
     /**
      * r3ok / PM R1912 (§25.52Y.42 item 5 (d)): walletEoaAddress checks origin, main frame and the bundle hash only, no

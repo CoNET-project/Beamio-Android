@@ -75,6 +75,11 @@ object ShellRecordChannel {
         val handler = PageBridgeHandlers.current ?: run { log("channel not attached: no SDK page bridge"); return }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) { log("channel unavailable (WEB_MESSAGE_LISTENER)"); return }
         WebViewCompat.addWebMessageListener(webView, JS_NAME, setOf(ORIGIN)) { _: WebView, message: WebMessageCompat, sourceOrigin: Uri, isMainFrame: Boolean, reply: JavaScriptReplyProxy ->
+            // r3os: source and frame first, before parsing: a mismatch answers origin_refused exactly once, nothing reaches the SDK.
+            WalletCredentialGate.windowSourceRefusal(message.data, isMainFrame, sourceOrigin.toString())?.let { refused ->
+                log("channel origin_refused (frame or origin)")
+                reply.postMessage(refused); return@addWebMessageListener
+            }
             // Spec r3cv §25.52AX.1: a message the channel cannot use gets exactly one answer, nothing reaches the SDK.
             val data = message.data ?: run { reply.postMessage(BAD_REQUEST); return@addWebMessageListener }
             val embedded = isMainFrame && sourceOrigin.toString().trimEnd('/') == ORIGIN
@@ -116,7 +121,7 @@ object ShellRecordChannel {
                     }
                 } catch (e: Exception) {
                     log(WalletCredentialGate.errorLine(WalletCredentialGate.SHELL_RECORD_READ, ShellRecordReplies.validReqId(data), e)) // log point 3
-                    WalletCredentialGate.ShellRecordGateResult(WalletCredentialGate.shellRecordRefusal(ShellRecordReplies.validReqId(data)), null, emptyList())
+                    WalletCredentialGate.ShellRecordGateResult(WalletCredentialGate.shellRecordUnreadable(ShellRecordReplies.validReqId(data)), null, emptyList())
                 }
                 out = gated.reply
                 gated.verdict?.let { v ->

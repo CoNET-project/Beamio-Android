@@ -368,10 +368,57 @@ class WalletCredentialGateTest {
         val out = WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord.put("nickname", "n"))) { v }
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, out.verdict)
         val o = JSONObject(out.reply)
-        // PM R1900 wire code origin_refused, envelope-level (r3ok): ok:false, error; no record, no other field
-        assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
+        // r3os: a bundle failure (allowed source) is not_trusted, envelope-level; no record, no other field
+        assertEquals("not_trusted", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
         assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
         assertEquals(listOf("mnemonicPhrase", "privateKeyArmor", "recoveryWords"), out.wFields)
+    }
+
+    /** Reviewer (R1969) on 0cd8bdf7: a bundle failure answers not_trusted; only a source/frame mismatch is origin_refused. */
+    @Test
+    fun y41_bundleFailureIsNotTrustedSourceMismatchIsOriginRefused() {
+        val v = WalletCredentialGate.evaluate(trusted(active = null), requireCapability = false)
+        assertEquals(Verdict.BUNDLE_NOT_VERIFIED, v)
+        val o = JSONObject(WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord)) { v }.reply)
+        assertEquals("not_trusted", o.getString("error")); assertEquals(false, o.getBoolean("ok"))
+        assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
+        for (sv in WalletCredentialGate.SOURCE_REFUSALS) {
+            assertEquals("origin_refused", JSONObject(WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord)) { sv }.reply).getString("error"))
+        }
+    }
+
+    /** Reviewer (R1969): an exception in the read-back gate answers the r3oo storage-error shape, not origin_refused. */
+    @Test
+    fun y41_gateExceptionAnswersRecordUnreadable() {
+        val o = JSONObject(WalletCredentialGate.shellRecordUnreadable(11))
+        assertEquals(true, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
+        assertEquals("error", o.getJSONObject("result").getString("code")); assertEquals("record_unreadable", o.getJSONObject("result").getString("sub"))
+        assertFalse(o.getJSONObject("result").has("record"))
+        val src = File("src/main/java/com/beamio/app/legacy/ShellRecordChannel.kt").readText()
+        val catchBlock = src.substringAfter("} catch (e: Exception) {\n                    log(WalletCredentialGate.errorLine(WalletCredentialGate.SHELL_RECORD_READ").substringBefore("}")
+        assertTrue(catchBlock.contains("shellRecordUnreadable(")); assertFalse(catchBlock.contains("shellRecordRefusal("))
+    }
+
+    /** Reviewer (R1969) on 039e736c: source/frame is checked before parsing; an iframe's unparsable text is origin_refused. */
+    @Test
+    fun windowSourceCheckRunsBeforeParsing() {
+        for ((data, frame, origin) in listOf(
+            Triple("not json", false, ChatOriginGate.TRUSTED),
+            Triple(null, false, ChatOriginGate.TRUSTED),
+            Triple("{\"type\":\"walletEoaAddress\",\"reqId\":\"r9\"}", false, ChatOriginGate.TRUSTED),
+            Triple("not json", true, "https://beamio.ca"),
+        )) {
+            val o = JSONObject(WalletCredentialGate.windowSourceRefusal(data, frame, origin)!!)
+            assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok"))
+            if (data?.startsWith("{") == true) assertEquals("r9", o.getString("reqId")) else assertTrue(o.isNull("reqId"))
+        }
+        assertNull(WalletCredentialGate.windowSourceRefusal("not json", true, ChatOriginGate.TRUSTED))
+        assertNull(WalletCredentialGate.windowSourceRefusal("x", true, ChatOriginGate.TRUSTED + "/"))
+        val src = File("src/main/java/com/beamio/app/legacy/ShellRecordChannel.kt").readText()
+        val first = src.indexOf("WalletCredentialGate.windowSourceRefusal(message.data, isMainFrame, sourceOrigin.toString())")
+        assertTrue(first > 0)
+        assertTrue(first < src.indexOf("val data = message.data ?: run { reply.postMessage(BAD_REQUEST)"))
+        assertTrue(first < src.indexOf("var out = if (!parsed) BAD_REQUEST"))
     }
 
     @Test
