@@ -25,6 +25,9 @@ object WalletCredentialGate {
     const val NOT_TRUSTED = "not_trusted"
     const val BAD_REQUEST = "bad_request"
     const val KEY_OVER_BRIDGE_REFUSED = "key_over_bridge_refused"
+    const val UNAVAILABLE = "unavailable"
+    /** shellRecordRead wire code for logical not_trusted (PM R1900; r3oh §25.52Y.41 item 6, §25.52D.6). */
+    const val SHELL_RECORD_ORIGIN_REFUSED = "origin_refused"
 
     /** How a command reached the shell. Only the WebMessage listener (origin rule + main frame) may carry walletCredential. */
     enum class Channel { WEB_MESSAGE, JS_INTERFACE }
@@ -159,6 +162,15 @@ object WalletCredentialGate {
         return r.optString("credentialKind") == "mnemonic" && core == RESULT_MNEMONIC && MNEMONIC.matches(r.optString("mnemonic"))
     }
 
+    /**
+     * W-L5 on the shell side (PM R1904; r3oh §25.52Y.38 item 8 (8e)): a walletCredential ack with
+     * `credentialKind = "eoa_key"` or an `eoaPrivateKey` field anywhere becomes `unavailable`, never reaching the page,
+     * whatever the SDK did.
+     */
+    fun eoaKeyReply(event: JSONObject): Boolean =
+        event.optJSONObject("result")?.optString("credentialKind") == "eoa_key" ||
+            keyFieldNames(event, setOf("eoaprivatekey")).isNotEmpty()
+
     // ---- other commands (§25.52Y.38 item 14: rules unchanged, walletCredential is the single exception) ----
 
     /** Names (lower case, sorted) of key fields anywhere in [v]; empty when there are none. Values are never read out. */
@@ -219,11 +231,19 @@ object WalletCredentialGate {
         if (names.isEmpty()) return ShellRecordGateResult(reply, null, names)
         val v = verdict() // evaluated only when W fields would go out (hashing active/ is the costly step)
         if (v == Verdict.TRUSTED) return ShellRecordGateResult(reply, v, names)
-        return ShellRecordGateResult(refusal(BridgeReqId.fromJsonText(request), NOT_TRUSTED).toString(), v, names)
+        return ShellRecordGateResult(shellRecordRefusal(BridgeReqId.fromJsonText(request)), v, names)
     }
 
     /** [reply] goes to the page; [verdict] is null when no W field was involved; [wFields] are names only. */
     class ShellRecordGateResult(val reply: String, val verdict: Verdict?, val wFields: List<String>)
+
+    /**
+     * The shellRecordRead answer for logical not_trusted, in the read-back's own shape (§25.52D.6 code in `result.code`, as
+     * the existing record_unreadable fallback): `{type:"ack", reqId, ok:true, result:{code:"origin_refused"}}`. No record.
+     */
+    fun shellRecordRefusal(reqId: Any?): String =
+        JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", true)
+            .put("result", JSONObject().put("code", SHELL_RECORD_ORIGIN_REFUSED)).toString()
 
     fun refusal(reqId: Any?, error: String): JSONObject =
         JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", false).put("error", error)

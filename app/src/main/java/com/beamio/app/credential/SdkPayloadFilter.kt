@@ -30,6 +30,10 @@ class SdkPayloadFilter(private val clock: () -> Long) {
         val p = if (e != null && rid != null && e.optString("type") == "ack") pending.remove(key(rid)) else null
         if (p != null) {
             val ms = clock() - p.startedMs
+            if (p.command == WalletCredentialGate.COMMAND && WalletCredentialGate.eoaKeyReply(e!!)) {
+                val unavailable = WalletCredentialGate.refusal(rid, WalletCredentialGate.UNAVAILABLE)
+                return Result(event(unavailable), true, WalletCredentialGate.replyLine(p.command, unavailable, ms) + " sdkReplyEoaKey=true")
+            }
             if (!WalletCredentialGate.responseAllowed(e!!, p.command)) {
                 val refused = WalletCredentialGate.refusal(rid, WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED)
                 return Result(event(refused), true, WalletCredentialGate.replyLine(p.command, refused, ms) + " sdkReplyRefused=true")

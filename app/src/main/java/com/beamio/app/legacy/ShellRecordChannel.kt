@@ -98,9 +98,7 @@ object ShellRecordChannel {
                     }
                 } catch (e: Exception) {
                     log(WalletCredentialGate.errorLine(WalletCredentialGate.SHELL_RECORD_READ, ShellRecordReplies.validReqId(data), e)) // log point 3
-                    WalletCredentialGate.ShellRecordGateResult(
-                        WalletCredentialGate.refusal(ShellRecordReplies.validReqId(data), WalletCredentialGate.NOT_TRUSTED).toString(), null, emptyList(),
-                    )
+                    WalletCredentialGate.ShellRecordGateResult(WalletCredentialGate.shellRecordRefusal(ShellRecordReplies.validReqId(data)), null, emptyList())
                 }
                 out = gated.reply
                 gated.verdict?.let { v ->

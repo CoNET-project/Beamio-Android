@@ -137,9 +137,40 @@ class WalletCredentialGateTest {
         val r = f.filter(SdkPayloadFilter.event(both))
         assertTrue(r.credentialReply)
         val out = r.payload.toString()
-        assertEquals(WalletCredentialGate.KEY_OVER_BRIDGE_REFUSED, r.payload!!.getJSONObject("event").getString("error"))
+        // refused with no field of it; since R1904 / r3oh a reply carrying eoaPrivateKey answers unavailable (W-L5 rule)
+        assertEquals(WalletCredentialGate.UNAVAILABLE, r.payload!!.getJSONObject("event").getString("error"))
         for (secret in listOf(words, testKey, testEoa, "mnemonic", "eoaPrivateKey", "result")) assertFalse(secret, out.contains(secret))
+        // both credentials without the key field name being eoaPrivateKey is still caught by the shape rule
+        assertFalse(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words).put("privateKeyHex", testKey))))
         assertFalse(r.logLine!!.contains(words) || r.logLine!!.contains(testKey))
+    }
+
+    /** W-L5 shell side (PM R1904; r3oh §25.52Y.38 item 8 (8e)): eoa_key or eoaPrivateKey -> unavailable, nothing else. */
+    @Test
+    fun wL5_eoaKeyReplyBecomesUnavailable() {
+        val cases = listOf(
+            ack(JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey)),
+            ack(JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key")),
+            ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words).put("eoaPrivateKey", testKey)),
+            JSONObject().put("type", "ack").put("reqId", 7).put("ok", false).put("error", "x").put("eoaPrivateKey", testKey),
+        )
+        for (c in cases) {
+            val f = SdkPayloadFilter { 0L }
+            f.expectCredentialReply(7)
+            val r = f.filter(SdkPayloadFilter.event(c))
+            val ev = r.payload!!.getJSONObject("event")
+            assertEquals(c.toString(), "unavailable", ev.getString("error")); assertEquals(false, ev.getBoolean("ok"))
+            assertEquals(setOf("type", "reqId", "ok", "error"), ev.keys().asSequence().toSet())
+            for (secret in listOf(testKey, words, "eoaPrivateKey", "mnemonic")) assertFalse(secret, r.payload.toString().contains(secret) || r.logLine!!.contains(secret))
+        }
+        // positive: a mnemonic reply still passes unchanged; walletEoaAddress is not affected by this rule
+        val f = SdkPayloadFilter { 0L }
+        f.expectCredentialReply(7)
+        val good = SdkPayloadFilter.event(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words)))
+        assertTrue(f.filter(good).payload === good)
+        f.expectCredentialReply(7, WalletCredentialGate.ADDRESS_COMMAND)
+        val addr = SdkPayloadFilter.event(ack(JSONObject().put("eoa", testEoa)))
+        assertTrue(f.filter(addr).payload === addr)
     }
 
     @Test
@@ -256,8 +287,10 @@ class WalletCredentialGateTest {
         val out = WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord.put("nickname", "n"))) { v }
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, out.verdict)
         val o = JSONObject(out.reply)
-        assertEquals("not_trusted", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
-        assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
+        // PM R1900 wire code: not_trusted -> origin_refused, in result.code; no record, no other field
+        assertEquals("origin_refused", o.getJSONObject("result").getString("code")); assertEquals(11, o.getInt("reqId"))
+        assertEquals(setOf("type", "reqId", "ok", "result"), o.keys().asSequence().toSet())
+        assertEquals(setOf("code"), o.getJSONObject("result").keys().asSequence().toSet())
         assertEquals(listOf("mnemonicPhrase", "privateKeyArmor", "recoveryWords"), out.wFields)
     }
 
@@ -265,7 +298,7 @@ class WalletCredentialGateTest {
     fun y41b_iframeAndRemoteOriginsAreNotTrusted() {
         for (i in listOf(trusted(isMainFrame = false), trusted(origin = "https://beamio.ca"), trusted(channel = Channel.JS_INTERFACE))) {
             val v = WalletCredentialGate.evaluate(i, requireCapability = false)
-            assertEquals("not_trusted", JSONObject(WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord)) { v }.reply).getString("error"))
+            assertEquals("origin_refused", JSONObject(WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord)) { v }.reply).getJSONObject("result").getString("code"))
         }
     }
 
