@@ -1855,8 +1855,9 @@ class MainActivity : ComponentActivity() {
                     android.util.Log.i("BeamioQaBridge", "evt type=$t reqId=${e.opt("reqId")} ok=${e.opt("ok")} error=${e.optString("error")} code=${e.optString("code")} eoa=$eoa")
                     e.optJSONObject("result")?.let { r ->
                         // Key names, plus values of a few public status fields only; addresses in short form.
+                        // notReadyReason (spec §25.52Y.39 items 9-10: g1_uninitialized | unreadable) is a public enum, logged for QA.
                         val keys = r.keys().asSequence().toList().sorted()
-                        val pub = listOf("state", "status", "ready", "hasKey", "code", "kind").filter { r.has(it) }.joinToString(" ") { "$it=${r.opt(it)}" }
+                        val pub = listOf("state", "status", "notReadyReason", "ready", "hasKey", "code", "kind").filter { r.has(it) }.joinToString(" ") { "$it=${r.opt(it)}" }
                         val addr = listOf("eoa", "address").firstOrNull { r.optString(it).length == 42 }?.let { k -> r.optString(k).let { a -> "$k=" + a.take(6) + "…" + a.takeLast(4) } } ?: ""
                         android.util.Log.i("BeamioQaBridge", "   result keys=$keys $pub $addr")
                         r.optJSONArray("capabilities")?.let { c -> android.util.Log.i("BeamioQaBridge", "   capabilities=" + (0 until c.length()).joinToString(",") { c.optString(it) } + " sdkVersion=" + r.optString("sdkVersion")) }
