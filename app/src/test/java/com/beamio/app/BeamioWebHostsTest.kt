@@ -65,4 +65,23 @@ class BeamioWebHostsTest {
         assertFalse(readme.contains("https://beamio.app/app"))
         assertTrue(readme.contains("https://beamio.ca/app"))
     }
+
+    /** PM R2040: the SDK's old-domain default apiBaseUrl is never used: the shell fills or moves it in a page init. */
+    @Test
+    fun chatApiBaseNeverFallsBackToTheOldDomain() {
+        assertEquals("https://beamio.ca/api", BeamioWebHosts.chatApiBaseFor(null))
+        assertEquals("https://beamio.ca/api", BeamioWebHosts.chatApiBaseFor(""))
+        assertEquals("https://beamio.ca/api", BeamioWebHosts.chatApiBaseFor("  "))
+        assertEquals("https://beamio.ca/api", BeamioWebHosts.chatApiBaseFor("https://beamio.app/api"))
+        assertEquals("https://www.beamio.ca/api/v2", BeamioWebHosts.chatApiBaseFor("https://WWW.beamio.app/api/v2"))
+        assertEquals("https://beamio.ca/api", BeamioWebHosts.chatApiBaseFor("http://beamio.app"))
+        // the live value and anything else stay as given
+        for (keep in listOf("https://beamio.ca/api", "https://www.beamio.ca/api", "https://pos.beamio.app/api", "https://api.example.test/x")) {
+            assertEquals(keep, null, BeamioWebHosts.chatApiBaseFor(keep))
+        }
+        val main = mainCode().joinToString("\n")
+        assertTrue(main.contains("BeamioWebHosts.chatApiBaseFor(if (body.has(\"apiBaseUrl\")) body.optString(\"apiBaseUrl\") else null)"))
+        val h = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
+        assertTrue(h.indexOf("chatApiBaseFor(") < h.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
+    }
 }

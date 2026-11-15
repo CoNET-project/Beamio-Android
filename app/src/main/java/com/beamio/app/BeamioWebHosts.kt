@@ -16,5 +16,26 @@ object BeamioWebHosts {
 
     fun isWebHost(host: String?): Boolean = host?.lowercase() in WEB_HOSTS
 
+    /** The chat SDK's API base on the live domain (PM R2040). */
+    const val CHAT_API_BASE = "$CANONICAL_ORIGIN/api"
+
+    /**
+     * PM R2040: the chat SDK (0.2.16-r1841qa) defaults `apiBaseUrl` to https://beamio.app/api and keeps it when an `init`
+     * payload has none. The value to put into a page `init` so the SDK never falls back to the old domain: the live base
+     * when the field is missing or blank, or the same URL moved to beamio.ca / www.beamio.ca when it names beamio.app /
+     * www.beamio.app; null when the given value stays as it is.
+     */
+    fun chatApiBaseFor(raw: String?): String? {
+        val v = raw?.trim().orEmpty()
+        if (v.isEmpty()) return CHAT_API_BASE
+        val u = runCatching { java.net.URI(v) }.getOrNull() ?: return null
+        val moved = when (u.host?.lowercase()) {
+            "beamio.app" -> "beamio.ca"
+            "www.beamio.app" -> "www.beamio.ca"
+            else -> return null
+        }
+        return java.net.URI("https", null, moved, -1, u.rawPath?.takeIf { it.isNotEmpty() } ?: "/api", null, null).toString()
+    }
+
     // NFC/SUN links are blocked by BeamioNfcSunBlock (a block list, both domains), not by this allow list.
 }

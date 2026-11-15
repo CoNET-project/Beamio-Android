@@ -1863,6 +1863,14 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
+        // PM R2040: an init without apiBaseUrl (or with one on beamio.app) would leave the SDK on its old-domain default;
+        // the shell fills in the live base. Logged without the value.
+        if (body.optString("type") == "init") {
+            BeamioWebHosts.chatApiBaseFor(if (body.has("apiBaseUrl")) body.optString("apiBaseUrl") else null)?.let {
+                body.put("apiBaseUrl", it)
+                Log.i(TAG, "init apiBaseUrl set to the live domain")
+            }
+        }
         BeamioChatSendHold.onCommand(applicationContext, body)
         BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
     }
