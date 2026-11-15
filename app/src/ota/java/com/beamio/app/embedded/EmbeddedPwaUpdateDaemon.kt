@@ -121,6 +121,8 @@ class EmbeddedPwaUpdateDaemon(
             EmbeddedPwaUpdateInfo(
                 ver = json.getString("ver"),
                 filename = json.getString("filename"),
+                // r3oj §25.52Y.38 item 2 (h): the published hash; without it the download is never staged.
+                zipSha256 = json.optString("zip_sha256").takeIf { it.isNotEmpty() },
             )
         } finally {
             conn.disconnect()
@@ -148,7 +150,7 @@ class EmbeddedPwaUpdateDaemon(
                 conn.inputStream.use { input ->
                     tempZip.outputStream().use { output -> input.copyTo(output) }
                 }
-                bundleStore.installDownloadToStaging(tempZip, remote.ver)
+                bundleStore.installDownloadToStaging(tempZip, remote.ver, remote.zipSha256)
             } finally {
                 tempZip.delete()
             }

@@ -21,4 +21,6 @@ object EmbeddedPwaConstants {
 data class EmbeddedPwaUpdateInfo(
     val ver: String,
     val filename: String,
+    /** `zip_sha256` of the published update.json (r3oj §25.52Y.38 item 2 (h)); null when absent. */
+    val zipSha256: String? = null,
 )

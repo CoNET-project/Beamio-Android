@@ -60,6 +60,7 @@ open class EmbeddedPwaBundleStore internal constructor(
 
     fun bootstrapIfNeeded() {
         verifiedBundle = null
+        activeCheck = null
         if (!remotePwaUpdate) {
             synchronized(lock) { bootstrapStoreLocked() }
             return
@@ -289,8 +290,25 @@ open class EmbeddedPwaBundleStore internal constructor(
 
     fun activeVersion(): String = readUpdateInfo(activeDir)?.ver ?: "0.0.0"
 
-    fun installDownloadToStaging(zipFile: File, expectedVersion: String) {
+    /**
+     * Spec r3oj §25.52Y.38 item 2 (h) (PM R1908, R1920): a downloaded bundle is staged only when every byte of [zipFile]
+     * hashes to [expectedZipSha256], the `zip_sha256` of the published update.json. Missing or different: nothing is
+     * staged (not loaded). After staging, its content digest is recorded outside staging/ and active/ (B5 record) so the
+     * trust check can match it when it becomes active.
+     */
+    fun installDownloadToStaging(zipFile: File, expectedVersion: String, expectedZipSha256: String?) {
         check(remotePwaUpdate) { REMOTE_DISABLED }
+        val expected = expectedZipSha256?.lowercase()?.takeIf { SHA256_HEX.matches(it) }
+        val actual = zipFile.inputStream().use { input ->
+            val md = MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(64 * 1024)
+            while (true) { val n = input.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+            md.digest().joinToString("") { b -> "%02x".format(b) }
+        }
+        if (expected == null || actual != expected) {
+            Log.w(TAG, "OTA zip sha256 ${shortDigest(actual)} not the published ${shortDigest(expected)}; not staged")
+            throw IllegalStateException("Downloaded bundle sha256 not verified against the published update.json")
+        }
         synchronized(lock) {
             if (stagingDir.exists()) {
                 stagingDir.deleteRecursively()
@@ -316,6 +334,7 @@ open class EmbeddedPwaBundleStore internal constructor(
                     .put("filename", "SilentPassUI-$expectedVersion.zip")
                     .toString(),
             )
+            writeOtaRecordLocked(contentDigest(stagingDir), actual, expectedVersion)
             pendingVersion = expectedVersion
         }
     }
@@ -376,23 +395,47 @@ open class EmbeddedPwaBundleStore internal constructor(
     }
 
     /**
-     * §25.52Y.38 item 2 (c) (iii) / §25.52Y.41 item 2: the zip SHA-256 whose bytes active/ holds now, or null. active/
-     * must have exactly the content of the bundled zip verified at this process's bootstrap; a downloaded (OTA) bundle,
-     * a partial or changed active/, or a process whose bootstrap could not hash the zip gives null. The full content
-     * digest is recomputed whenever the file list, sizes or modification times differ from the last check.
+     * §25.52Y.38 item 2 (c) (iii) / (h), §25.52Y.41 item 2: the zip SHA-256 whose bytes active/ holds now, or null.
+     * active/ must have exactly the content of the bundled zip verified at this process's bootstrap, or of a downloaded
+     * bundle verified against the published update.json (B5 record). A partial or changed active/, or a downloaded bundle
+     * without a record, gives null. The full content digest is recomputed whenever the file list, sizes or modification
+     * times differ from the last check.
      */
     fun verifiedActiveZipSha256(): String? = synchronized(lock) {
-        val v = verifiedBundle?.takeIf { it.store === this } ?: return null
         try {
             val fp = activeFingerprint()
-            if (fp != v.checkedFingerprint) {
-                v.matches = contentDigest(activeDir) == v.contentDigest
-                v.checkedFingerprint = fp
+            activeCheck?.takeIf { it.first == fp }?.let { return it.second }
+            val digest = if (activeDir.isDirectory) contentDigest(activeDir) else null
+            val embedded = verifiedBundle?.takeIf { it.store === this }
+            val sha = when {
+                digest == null -> null
+                embedded != null && embedded.contentDigest == digest -> embedded.zipSha256
+                else -> otaRecordZipSha(digest) // r3oj (h): a downloaded bundle verified against update.json
             }
-            if (v.matches) v.zipSha256 else null
+            activeCheck = fp to sha
+            sha
         } catch (_: Exception) {
             null
         }
+    }
+
+    /** Last trust check of active/: its fingerprint and the zip SHA-256 it matched (null = none). */
+    @Volatile private var activeCheck: Pair<String, String?>? = null
+
+    private val otaRecordDir: File get() = File(rootDir, OTA_RECORD_DIR)
+
+    /** One small file per verified download, named by its content digest; keeps the newest [OTA_RECORDS_KEPT]. */
+    private fun writeOtaRecordLocked(contentDigest: String, zipSha256: String, ver: String) {
+        otaRecordDir.mkdirs()
+        File(otaRecordDir, "$contentDigest.json").writeText(JSONObject().put("zip_sha256", zipSha256).put("ver", ver).toString())
+        otaRecordDir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(OTA_RECORDS_KEPT)?.forEach { it.delete() }
+        activeCheck = null
+    }
+
+    private fun otaRecordZipSha(contentDigest: String): String? {
+        if (!SHA256_HEX.matches(contentDigest)) return null
+        val f = File(otaRecordDir, "$contentDigest.json").takeIf { it.isFile } ?: return null
+        return runCatching { JSONObject(f.readText()).getString("zip_sha256").lowercase() }.getOrNull()?.takeIf { SHA256_HEX.matches(it) }
     }
 
     /** Relative path, size and modification time of every content file of active/ (no contents), hashed. */
@@ -537,13 +580,14 @@ open class EmbeddedPwaBundleStore internal constructor(
     }
 
     /** In-memory trust record of the bundled zip verified by this process's bootstrap (see [verifiedActiveZipSha256]). */
-    private class VerifiedBundle(val store: EmbeddedPwaBundleStore, val zipSha256: String, val contentDigest: String) {
-        var checkedFingerprint: String? = null
-        var matches: Boolean = false
-    }
+    private class VerifiedBundle(val store: EmbeddedPwaBundleStore, val zipSha256: String, val contentDigest: String)
 
     companion object {
         private val PROCESS_LOCK = Any()
+        private val SHA256_HEX = Regex("^[0-9a-f]{64}$")
+        /** B5 records of verified downloads (r3oj (h)); outside staging/ and active/, never written by unzip. */
+        internal const val OTA_RECORD_DIR = "ota-verified"
+        private const val OTA_RECORDS_KEPT = 3
 
         /** Process-wide: one bootstrap per process; set by it, read by [verifiedActiveZipSha256] under [PROCESS_LOCK]. */
         @Volatile private var verifiedBundle: VerifiedBundle? = null

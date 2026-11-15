@@ -74,8 +74,9 @@ object WalletCredentialGate {
         val origin = ChatOriginGate.originOf(i.sourceOrigin) ?: i.sourceOrigin?.trimEnd('/')
         if (origin != ChatOriginGate.TRUSTED) return Verdict.ORIGIN_REFUSED
         if (!requireCapability) {
-            val b = i.buildZipSha256.lowercase()
-            return if (SHA256.matches(b) && i.verifiedActiveZipSha256?.lowercase() == b) Verdict.TRUSTED else Verdict.BUNDLE_NOT_VERIFIED
+            // r3oj (h): the embedded bundle verified against the lock, or a download verified against the published
+            // update.json; the store returns a hash only for one of those two.
+            return if (i.verifiedActiveZipSha256?.lowercase()?.let { SHA256.matches(it) } == true) Verdict.TRUSTED else Verdict.BUNDLE_NOT_VERIFIED
         }
         if (CAPABILITY !in i.manifestCapabilities) return Verdict.NO_MANIFEST_CAPABILITY
         val m = i.manifestZipSha256.lowercase()

@@ -69,12 +69,14 @@ class EmbeddedPwaUpdateDaemonStoreTest {
     fun storeN1RemoteManifestWithHigherVersionIsNeverRequested() {
         bundledZip = zipOf(bundledVersion)
         val remoteZip = zipOf(higherVersion)
+        val remoteSha = java.security.MessageDigest.getInstance("SHA-256").digest(remoteZip).joinToString("") { "%02x".format(it) }
         val requests = java.util.concurrent.atomic.AtomicInteger(0)
         val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { ex ->
             requests.incrementAndGet()
             val body = if (ex.requestURI.path.endsWith("update.json")) {
-                """{"ver":"$higherVersion","filename":"SilentPassUI-$higherVersion.zip"}""".toByteArray()
+                // r3oj §25.52Y.38 item 2 (h): the published update.json carries the zip's sha256, or nothing is staged
+                """{"ver":"$higherVersion","filename":"SilentPassUI-$higherVersion.zip","zip_sha256":"$remoteSha"}""".toByteArray()
             } else {
                 remoteZip
             }

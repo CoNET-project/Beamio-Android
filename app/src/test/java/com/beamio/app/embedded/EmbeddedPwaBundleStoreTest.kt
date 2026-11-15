@@ -149,7 +149,7 @@ class EmbeddedPwaBundleStoreTest {
         val store = newStore()
         val zip = tmp.newFile("web.zip").apply { writeBytes(zipOf(assetPrefix = "/app", version = "9.9.9")) }
 
-        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, "9.9.9") }
+        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes())) }
 
         assertFalse(store.stagingDir.exists())
         assertNull(store.pendingUpdateVersion())
@@ -162,7 +162,7 @@ class EmbeddedPwaBundleStoreTest {
         val store = newStore()
         val zip = tmp.newFile("ok.zip").apply { writeBytes(zipOf(assetPrefix = "", version = "9.9.9")) }
 
-        store.installDownloadToStaging(zip, "9.9.9")
+        store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes()))
         assertEquals("9.9.9", store.pendingUpdateVersion())
 
         store.promoteStagingToActive()
@@ -273,7 +273,7 @@ class EmbeddedPwaBundleStoreTest {
         assertNull(store.pendingUpdateVersion())
         assertThrows(IllegalStateException::class.java) { store.promoteStagingToActive() }
         val zip = tmp.newFile("remote.zip").apply { writeBytes(zipOf(assetPrefix = "", version = higherVersion)) }
-        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, higherVersion) }
+        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, higherVersion, sha256(zip.readBytes())) }
         assertEquals(before, store.contentDigest(store.activeDir))
 
         store.bootstrapIfNeeded() // next cold start
@@ -650,6 +650,59 @@ class EmbeddedPwaBundleStoreTest {
         writeBundle(store.activeDir, "", "1.0.0")
         store.bootstrapIfNeeded()
         assertNull(store.verifiedActiveZipSha256())
+    }
+
+    // r3oj §25.52Y.38 item 2 (h): downloaded bundles are trusted per package, against the published zip_sha256.
+
+    @Test
+    fun otaDownloadIsStagedOnlyWithTheMatchingPublishedHash() {
+        writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.927")
+        val store = newStore()
+        val zip = tmp.newFile("ota.zip").apply { writeBytes(zipOf(assetPrefix = "", version = "9.9.9")) }
+        for (bad in listOf(null, "", "0".repeat(64), sha256(zip.readBytes()).uppercase().take(63))) {
+            assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, "9.9.9", bad) }
+            assertFalse(store.stagingDir.exists()); assertNull(store.pendingUpdateVersion())
+        }
+        store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes()).uppercase()) // case-insensitive hash
+        assertEquals("9.9.9", store.pendingUpdateVersion())
+    }
+
+    @Test
+    fun verifiedOtaBundleIsTrustedWhenActiveAndOnlyWhileUnchanged() {
+        val bundled = zipOf("", "1.0.0")
+        val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(bundled) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = sha256(bundled))
+        store.bootstrapIfNeeded()
+        assertEquals(sha256(bundled), store.verifiedActiveZipSha256())
+        val ota = tmp.newFile("ota2.zip").apply { writeBytes(zipOf("", "2.0.0", padding = 2)) }
+        store.installDownloadToStaging(ota, "2.0.0", sha256(ota.readBytes()))
+        store.promoteStagingToActive()
+        assertEquals("2.0.0", store.activeVersion())
+        assertEquals(sha256(ota.readBytes()), store.verifiedActiveZipSha256())
+        // next cold start keeps the newer verified download and its trust
+        store.bootstrapIfNeeded()
+        assertEquals("2.0.0", store.activeVersion())
+        assertEquals(sha256(ota.readBytes()), store.verifiedActiveZipSha256())
+        // a changed file: no trust
+        File(store.activeDir, "static/js/main.js").appendText("// changed")
+        assertNull(store.verifiedActiveZipSha256())
+    }
+
+    @Test
+    fun otaRecordCannotBePlantedByTheDownloadedZip() {
+        val store = newStore()
+        val evilDigest = "a".repeat(64)
+        val zip = tmp.newFile("evil.zip").apply {
+            val out = ByteArrayOutputStream()
+            ZipOutputStream(out).use { z ->
+                for ((n, b) in listOf("index.html" to indexHtml(""), "update.json" to updateJson("9.9.9"), "static/js/main.js" to "//",
+                        "../${EmbeddedPwaBundleStore.OTA_RECORD_DIR}/$evilDigest.json" to "{\"zip_sha256\":\"${"b".repeat(64)}\"}")) {
+                    z.putNextEntry(ZipEntry(n)); z.write(b.toByteArray()); z.closeEntry()
+                }
+            }
+            writeBytes(out.toByteArray())
+        }
+        runCatching { store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes())) }
+        assertFalse(File(root, "${EmbeddedPwaBundleStore.OTA_RECORD_DIR}/$evilDigest.json").exists())
     }
 
     private fun assertActiveIsEmbedded(store: EmbeddedPwaBundleStore) {

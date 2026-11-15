@@ -277,6 +277,7 @@ class WalletCredentialGateTest {
         assertEquals(Verdict.TRUSTED, WalletCredentialGate.evaluate(noBits, WalletCredentialGate.requiresCapability("walletEoaAddress")))
         assertEquals(Verdict.NO_MANIFEST_CAPABILITY, WalletCredentialGate.evaluate(noBits, WalletCredentialGate.requiresCapability("walletCredential")))
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, WalletCredentialGate.evaluate(noBits.copy(verifiedActiveZipSha256 = null), false))
+        assertEquals(Verdict.BUNDLE_NOT_VERIFIED, WalletCredentialGate.evaluate(noBits.copy(verifiedActiveZipSha256 = "x"), false))
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(main.contains("requireCapability = WalletCredentialGate.requiresCapability(command)"))
     }
@@ -342,9 +343,11 @@ class WalletCredentialGateTest {
     @Test
     fun y41a_unverifiedPackageIsNotTrustedWithNoPartialFields() {
         assertEquals(Verdict.TRUSTED, WalletCredentialGate.evaluate(trusted(caps = emptySet(), sdk = emptySet(), manifestSha = ""), requireCapability = false))
-        for (active in listOf(null, hex(32))) {
-            assertEquals(Verdict.BUNDLE_NOT_VERIFIED, WalletCredentialGate.evaluate(trusted(caps = emptySet(), active = active), requireCapability = false))
-        }
+        assertEquals(Verdict.BUNDLE_NOT_VERIFIED, WalletCredentialGate.evaluate(trusted(caps = emptySet(), active = null), requireCapability = false))
+        // r3oj (h): a verified download (its own published hash) is trusted for the no-capability path, never for walletCredential
+        val otaSha = hex(32)
+        assertEquals(Verdict.TRUSTED, WalletCredentialGate.evaluate(trusted(caps = emptySet(), active = otaSha), requireCapability = false))
+        assertEquals(Verdict.BUNDLE_NOT_VERIFIED, WalletCredentialGate.evaluate(trusted(active = otaSha)))
         val v = WalletCredentialGate.evaluate(trusted(active = null), requireCapability = false)
         val out = WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord.put("nickname", "n"))) { v }
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, out.verdict)
