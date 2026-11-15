@@ -30,5 +30,17 @@ class WalletStatusPassThroughTest {
     @Test
     fun notReadyReasonIsLoggedAsAPublicFieldInDebugOnly() {
         assertTrue(handler.contains("listOf(\"state\", \"status\", \"notReadyReason\", \"ready\", \"hasKey\", \"code\", \"kind\")"))
+        assertTrue(handler.contains("QaBridgeLogFields.value(it, r.opt(it))"))
+    }
+
+    /** Review of e32ca58c: only the two defined values are printed; anything else becomes <unknown> (runtime check). */
+    @Test
+    fun notReadyReasonValueIsLimitedToItsTwoDefinedValues() {
+        assertEquals("g1_uninitialized", QaBridgeLogFields.value("notReadyReason", "g1_uninitialized"))
+        assertEquals("unreadable", QaBridgeLogFields.value("notReadyReason", "unreadable"))
+        for (bad in listOf<Any?>("ok", "", "G1_UNINITIALIZED", "g1_uninitialized ", "0x1234", 7, null, org.json.JSONObject.NULL)) {
+            assertEquals("bad value $bad", "<unknown>", QaBridgeLogFields.value("notReadyReason", bad))
+        }
+        assertEquals("not_ready", QaBridgeLogFields.value("status", "not_ready"))
     }
 }
