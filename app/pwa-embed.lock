@@ -1,0 +1,8 @@
+# Written by scripts/syncEmbeddedPwaZipToNativeShells.sh at 2026-11-15T11:29:49Z. Do not edit by hand.
+zip_sha256=bc7a5fcef1c2310cd3e377bbfd7e960aea38301047f9d78ce1b7e5e75a9f93be
+zip_ver=0.53.0
+classification=qa-candidate
+qa_manifest=QA-MANIFEST-shell-shared-0.53.0-9bb766bc.json
+qa_manifest_sha256=04fa5d91e017f3a59c43d31de59a3e74a85fddbe92aaf2ad0f4b971d16bec0c8
+qa_ver=0.53.0
+qa_zip_sha256=bc7a5fcef1c2310cd3e377bbfd7e960aea38301047f9d78ce1b7e5e75a9f93be

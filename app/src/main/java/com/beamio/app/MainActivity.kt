@@ -1,212 +1,4061 @@
 package com.beamio.app
+import network.conet.chat.BeamioSiCipherPost
+import network.conet.chat.BeamioChatPgpStore
+import network.conet.chat.BeamioConetChatModule
 
 import android.Manifest
-import android.content.pm.ActivityInfo
+import android.annotation.SuppressLint
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
+import android.nfc.NfcAdapter
+import android.os.Environment
+import android.os.Build
 import android.os.Bundle
+import android.os.Message
 import android.util.Log
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Outline
+import android.graphics.Rect
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.util.Base64
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.PixelCopy
 import android.view.View
-import android.webkit.*
+import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.webkit.JavascriptInterface
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebChromeClient
+import android.webkit.ValueCallback
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.setContent
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.beamio.app.ui.theme.BeamioTheme
-import com.beamio.app.BuildConfig
-class MainActivity : ComponentActivity() {
-    private val cameraPermission = Manifest.permission.CAMERA
-    private val requestCameraPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            // 这里你可以打个 log，或者提示一下
-            Log.d("BeamioMain", "Camera permission granted? $granted")
-        }
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import com.beamio.app.embedded.EmbeddedPwaConstants
+import com.beamio.app.embedded.EmbeddedPwaHost
+import com.beamio.app.embedded.EmbeddedPwaOtaFactory
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
+import com.beamio.app.nativekey.NativeKeyImportActivity
+import com.beamio.app.nativekey.NativeKeyImportRoute
+import com.beamio.app.nativekey.NativeAccountCreateActivity
+import com.beamio.app.qa.QaWriteGuard
+import com.beamio.app.legacy.ShellRecordChannel
+import com.beamio.app.legacy.PgpMigrationRunner
+import com.beamio.app.nativekey.NativeAccountCreateRoute
+import com.beamio.app.nativekey.NativeRecoveryActivity
+import com.beamio.app.nativekey.NativeRecoveryRoute
+import com.beamio.app.nativekey.NativeKeySdkBinding
+import com.beamio.app.nativekey.ShellNoKeyGate
 
-        if (BuildConfig.DEBUG) {
-            WebView.setWebContentsDebuggingEnabled(true)
-        }
+/**
+ * Main document only: forces revalidation so WebView does not reuse a stale index.html from disk
+ * (Android WebView often ignores response Cache-Control for the first load compared to Chrome).
+ */
+private val HOME_DOCUMENT_REQUEST_HEADERS = mapOf(
+    "Cache-Control" to "no-cache",
+    "Pragma" to "no-cache",
+)
 
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        val webView = WebView(this).apply {
-            settings.javaScriptEnabled = true
-
-            settings.domStorageEnabled = true
-            settings.databaseEnabled = true
-
-            webViewClient = WebViewClient() // opens links inside WebView
-
-            webChromeClient = object : WebChromeClient() {
-                override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                    Log.d(
-                        "WebViewConsole",
-                        "JS [${consoleMessage.messageLevel()}] @ ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()} → ${consoleMessage.message()}"
-                    )
-                    return true
-                }
-            }
-            loadUrl("https://beamio.app/app/") // 🔁 Replace with your URL
-
-        }
-
-
-        setContentView(webView)
-
-
-    }
+/** Return values for [CashTreesJsBridge.getNfcStatus] — consumed by PWA */
+private object NfcStatusStrings {
+    const val READY = "ready"
+    const val NO_HARDWARE = "no_hardware"
+    const val DISABLED = "disabled"
+    /** Manifest 未声明 [android.Manifest.permission.NFC] 或安装包过旧时；需重装应用。 */
+    const val PERMISSION_DENIED = "nfc_permission_denied"
 }
 
-private const val TAG = "BeamioWebView"
+class MainActivity : ComponentActivity() {
 
-@Composable
-fun BeamioWebViewScreen() {
-    val context = LocalContext.current
+    companion object {
+        /** PM R1574: Retry on the unavailable page (handled in shouldOverrideUrlLoading, never fetched). */
+        private const val EMBEDDED_RETRY_URL = "https://appassets.androidplatform.net/__beamio/retry-bootstrap"
 
-    var isPageLoaded by remember { mutableStateOf(false) }
+        private val EMBEDDED_UNAVAILABLE_HTML = """
+            <!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+            <body style="background:#000414;color:white;font:16px sans-serif;padding:32px">
+            <h2>Beamio could not open its local app</h2>
+            <p>The app bundle on this device could not be loaded. Your wallet and data were not deleted.</p>
+            <p>本机的应用界面暂时无法加载。钱包和数据没有被删除。</p>
+            <p id="s"></p>
+            <p><a href="$EMBEDDED_RETRY_URL" style="display:inline-block;padding:12px 24px;border-radius:999px;background:white;color:#000414;text-decoration:none;font-weight:bold">Retry / 重试</a></p>
+            </body>
+        """.trimIndent()
+        private const val TAG = "MainActivity"
+        /** Longest the dial screen waits for the page's offer before it shows anyway. */
+        private const val PREPARED_SCREEN_MAX_WAIT_MS = 600L
 
-    Box(modifier = Modifier.fillMaxSize()) {
+        @Volatile
+        private var activeInstance: MainActivity? = null
 
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
+        @Volatile
+        private var uiResumed: Boolean = false
 
-                WebView(ctx).apply {
+        /** True while the WebView activity exists in this process. A cold FCM wake has no instance. */
+        fun isRunning(): Boolean = activeInstance != null
 
-                    // ⭐ 接受 Cookie（Cloudflare / 登录有时依赖）
-                    val cookieManager = CookieManager.getInstance()
-                    cookieManager.setAcceptCookie(true)
-                    cookieManager.setAcceptThirdPartyCookies(this, true)
+        /** True only while MainActivity is between onResume and onPause (user-visible). */
+        fun isUiResumed(): Boolean = uiResumed
 
-                    settings.apply {
-                        // 必须：JS + DOM Storage
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
+        /**
+         * Bring the Consumer shell to the foreground so its PWA can reconnect
+         * to the mailbox and report a verified voice offer through the bridge.
+         *
+         * This deliberately carries no call identity or offer data. The native
+         * side only wakes the shell; caller identity remains PWA-decrypted and
+         * is delivered one-way through reportIncomingSystemCall().
+         */
+        fun wakeConsumerShell(context: Context) {
+            // Glass lives in its own task. Raising opaque Main while glass is
+            // presenting covers IncomingCallActivity on Samsung — mailbox only.
+            if (IncomingCallActivity.isPresentInFlight() || IncomingCallActivity.isShowing()) {
+                requestMailboxWake()
+                Log.i("BeamioVoiceCall", "Mailbox wake only; incoming glass owns foreground")
+                return
+            }
+            // Under launcher, moveTaskToFront / PendingIntent.raise Main BAL_BLOCK
+            // and aborts the pending CallStyle FSI. During RINGING, mailbox only.
+            if (BeamioTelecomService.hasActiveIncomingRing()) {
+                requestMailboxWake()
+                Log.i("BeamioVoiceCall", "Mailbox wake only; CallStyle FSI owns glass under launcher")
+                return
+            }
+            if (isUiResumed()) {
+                requestMailboxWake()
+                Log.i("BeamioVoiceCall", "Mailbox wake; Main already resumed")
+                return
+            }
+            if (isRunning()) {
+                bringAppTaskForward(context)
+                requestMailboxWake()
+                Log.i("BeamioVoiceCall", "Mailbox wake + app task raised")
+                return
+            }
+            Log.i("BeamioVoiceCall", "Shell start waits until the incoming window is showing")
+        }
 
-                        // 有 http 资源时避免被拦截
-                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-
-                        // 尽量拟合手机 Chrome 的 UA，避免站点基于 "wv" 做奇怪处理
-                        userAgentString =
-                            "Mozilla/5.0 (Linux; Android 14; Pixel 7) " +
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                                    "Chrome/120.0.0.0 Mobile Safari/537.36 BeamioAppWebView"
-
-                        // 自适应
-                        loadWithOverviewMode = true
-                        useWideViewPort = true
-
-
-                        // 禁止缩放
-                        builtInZoomControls = false
-                        displayZoomControls = false
-                        setSupportZoom(false)
-                        textZoom = 100
-
-                        // 一些老 API，有的框架还用得到（可选）
-                        databaseEnabled = true
-                        javaScriptCanOpenWindowsAutomatically = true
-                    }
-
-                    // 看得出白屏是不是背景色根本就是白的
-                    setBackgroundColor(0xFFFFFFFF.toInt())
-
-
-                    isHorizontalScrollBarEnabled = false
-                    overScrollMode = View.OVER_SCROLL_NEVER
-
-                    // ⭐ 打印 JS 的 console.log / error 到 Logcat
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                            Log.d(
-                                "BeamioWebView",
-                                "JS console: ${consoleMessage?.message()} " +
-                                        "(${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()})"
-                            )
-                            return super.onConsoleMessage(consoleMessage)
-                        }
-                    }
-
-                    webViewClient = object : WebViewClient() {
-
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): Boolean {
-                            // 让 WebView 自己处理
-                            return false
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            Log.d("BeamioWebView", "onPageFinished: $url")
-                            isPageLoaded = true
-                        }
-
-                        override fun onReceivedError(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                            error: WebResourceError?
-                        ) {
-                            super.onReceivedError(view, request, error)
-                            Log.e(
-                                "BeamioWebView",
-                                "onReceivedError: ${error?.errorCode} ${error?.description}"
-                            )
-                        }
-
-                        override fun onReceivedHttpError(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                            errorResponse: WebResourceResponse?
-                        ) {
-                            super.onReceivedHttpError(view, request, errorResponse)
-                            Log.e(
-                                "BeamioWebView",
-                                "onReceivedHttpError: ${errorResponse?.statusCode} ${errorResponse?.reasonPhrase}"
-                            )
-                        }
-                    }
-
-                    // ✅ 目标地址
-                    loadUrl("https://beamio.app/app/")
+        /**
+         * Move the existing MainActivity task above the launcher so a same-task
+         * translucent IncomingCallActivity can actually appear. Uses
+         * moveTaskToFront plus a BAL-safe PendingIntent on the opaque shell
+         * (Samsung often Aborts translucent starts while allowing opaque).
+         */
+        fun bringAppTaskForward(context: Context) {
+            val app = context.applicationContext
+            val activity = activeInstance
+            if (activity != null) {
+                runCatching {
+                    @Suppress("DEPRECATION")
+                    val am = app.getSystemService(android.app.ActivityManager::class.java)
+                    am?.moveTaskToFront(
+                        activity.taskId,
+                        android.app.ActivityManager.MOVE_TASK_WITH_HOME,
+                    )
+                    Log.i(
+                        "BeamioVoiceCall",
+                        "App task moveTaskToFront taskId=${activity.taskId}",
+                    )
+                }.onFailure {
+                    Log.w("BeamioVoiceCall", "App task moveTaskToFront failed: ${it.message}")
                 }
             }
-        )
+            val intent = Intent(app, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_NO_USER_ACTION
+                putExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, true)
+            }
+            IncomingCallActivity.forceBringActivityViaPendingIntent(
+                app,
+                intent,
+                requestCode = 2,
+            )
+        }
 
-        // 启动图标覆盖层
-        if (!isPageLoaded) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    painter = painterResource(id = R.drawable.ic_beamio_logo),
-                    contentDescription = "Beamio",
-                    modifier = Modifier.size(160.dp)
+        /** Wake the PWA mailbox listener without reordering activities. */
+        fun requestMailboxWake() {
+            val activity = activeInstance ?: return
+            activity.runOnUiThread {
+                activity.intent.putExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, true)
+                activity.mailboxWakeDispatchAttempt = 0
+                activity.pendingSystemCallHandler.removeCallbacks(activity.mailboxWakeDispatchRunnable)
+                activity.pendingSystemCallHandler.post(activity.mailboxWakeDispatchRunnable)
+            }
+        }
+
+        fun dispatchSystemCallAction(
+            action: String,
+            callId: String,
+            sessionId: String = "",
+            context: Context? = null,
+        ) {
+            // Persist user actions until the PWA listener is ready. Caller
+            // identity is never requested from or supplied by the native side;
+            // it arrives only through reportIncomingSystemCall from the PWA.
+            val activity = activeInstance
+            if (activity == null) {
+                if (context != null) {
+                    BeamioTelecomService.savePendingSystemCallAction(
+                        context,
+                        action,
+                        callId,
+                        sessionId,
+                    )
+                    Log.i(
+                        "BeamioVoiceCall",
+                        "queued system call action before WebView activity " +
+                            "action=$action callIdPresent=${callId.isNotBlank()}",
+                    )
+                } else {
+                    Log.w(
+                        "BeamioVoiceCall",
+                        "dropped system call action without context action=$action",
+                    )
+                }
+                return
+            }
+            activity.runOnUiThread {
+                // Keep the action persisted until the WebView has actually
+                // accepted the event. Cold starts and an uninitialised
+                // WebView must be retried by the pending-action dispatcher.
+                if (!activity::webView.isInitialized) return@runOnUiThread
+                activity.dispatchAndroidBridgeJsonToWeb(
+                    JSONObject()
+                        .put("action", action)
+                        .put("callId", callId)
+                        .put("sessionId", sessionId),
+                ) {
+                    context?.let { BeamioTelecomService.clearPendingSystemCallAction(it) }
+                }
+            }
+        }
+
+        /**
+         * An offer the page reported had already ended before anyone answered it
+         * (settledAs: callEnded, callTimedOut or callRejected). The page only fixes
+         * its call record; nothing is sent to the caller. Not queued: the page
+         * reports the offer again on its next replay.
+         */
+        fun dispatchIncomingCallSettled(settledAs: String, callId: String, sessionId: String) {
+            val activity = activeInstance ?: return
+            activity.runOnUiThread {
+                if (!activity::webView.isInitialized) return@runOnUiThread
+                activity.dispatchAndroidBridgeJsonToWeb(
+                    JSONObject()
+                        .put("action", "incomingCallSettled")
+                        .put("settledAs", settledAs)
+                        .put("callId", callId)
+                        .put("sessionId", sessionId),
                 )
             }
         }
-    }
-}
 
-@Preview(showBackground = true)
-@Composable
-fun BeamioWebViewPreview() {
-    BeamioTheme {
-        BeamioWebViewScreen()
+        private val ALLOWED_EXTERNAL_URL_SCHEMES = setOf(
+            "http", "https", "mailto", "tel",
+            "ethereum",
+            "metamask", "cbwallet", "coinbase", "base",
+            "okx", "okex", "tpdapp", "tpoutside", "phantom", "trust",
+        )
+
+        /**
+         * Minimize InCall → bring MainActivity forward and show the green
+         * “Return to call” pill (iOS BeamioInCallReturnPill).
+         */
+        fun bringForwardWithInCallReturnPill(context: Context) {
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                putExtra(EXTRA_SHOW_IN_CALL_RETURN_PILL, true)
+            }
+            runCatching { context.startActivity(intent) }
+            val activity = activeInstance
+            if (activity != null) {
+                activity.runOnUiThread { activity.showInCallReturnPill() }
+            }
+        }
+
+        fun hideInCallReturnPill() {
+            val activity = activeInstance ?: return
+            activity.runOnUiThread { activity.hideInCallReturnPillInternal() }
+        }
+
+        /**
+         * Prompt RECORD_AUDIO for native temporary-channel mic uplink when
+         * MainActivity is the foreground host (InCall may not be showing yet).
+         */
+        fun requestMicForVoiceUplink() {
+            val activity = activeInstance ?: return
+            if (activity.isFinishing) return
+            activity.runOnUiThread { activity.ensureMicForVoiceUplink() }
+        }
+
+        private const val EXTRA_SHOW_IN_CALL_RETURN_PILL = "beamio.show_in_call_return_pill"
+    }
+
+    private lateinit var webView: WebView
+    private var nativeVoiceMic: BeamioNativeVoiceMic? = null
+    private lateinit var embeddedPwaHost: EmbeddedPwaHost
+    private lateinit var rootLayout: FrameLayout
+    /**
+     * Last WebView frame, taken when a call screen covers this activity. While the
+     * activity is stopped the WebView drops its frame and needs a moment to draw
+     * again, so the call screen's exit used to reveal a blank page first.
+     */
+    private var callCoverSnapshot: Bitmap? = null
+    private var callCoverView: ImageView? = null
+    private var callCoverGeneration = 0
+    /** Between onStart and onStop. */
+    private var uiVisible = false
+    /** Green return-to-call pill while InCall is minimized (iOS parity). */
+    private var inCallReturnPill: View? = null
+    private val inCallReturnPillHandler = Handler(Looper.getMainLooper())
+    private val inCallReturnPillTick = object : Runnable {
+        override fun run() {
+            refreshInCallReturnPillLabel()
+            if (inCallReturnPill != null && InCallScreenModel.isLive()) {
+                inCallReturnPillHandler.postDelayed(this, 1_000L)
+            }
+        }
+    }
+    /** Full-screen in-app browser overlay (bottom → top). Null when closed. */
+    private var inAppBrowserOverlay: ViewGroup? = null
+    private var inAppBrowserWebView: WebView? = null
+    private var inAppBrowserChrome: View? = null
+    private var inAppBrowserClosing = false
+    /** Optional PWA requestId echoed on `inAppBrowserClosed`. */
+    private var inAppBrowserRequestId: String = ""
+    private var inAppBrowserOpenedUrl: String = ""
+    /** Debounce non-http launches from the in-app WebView (stops market:// chooser shake). */
+    private var inAppLastExternalLaunchKey: String? = null
+    private var inAppLastExternalLaunchAtMs: Long = 0L
+    // Beamio scroll chrome (mirrors useScrollCapsuleOpacity / iOS CashTreesInAppBrowserController).
+    private var inAppChromeOpacity = 1f
+    private var inAppLastScrollTop = 0f
+    private var inAppLatestScrollTop = 0f
+    private var inAppRevealPendingDistance = 0f
+    private var inAppRevealArmed = false
+    private var inAppRevealReady = false
+    private var inAppHideUnlock = false
+    /** Top padding so page content clears safe-area + Back/title; 0 when chrome hidden (edge-to-edge). */
+    private var inAppChromeContentInsetPx = 0
+    private val inAppChromeHandler = Handler(Looper.getMainLooper())
+    private val inAppHideUnlockRunnable = Runnable {
+        inAppHideUnlock = false
+        if (inAppLatestScrollTop > 40f && inAppChromeOpacity > 0f) {
+            applyInAppChromeOpacity(computeInAppChromeOpacity(inAppLatestScrollTop), animated = true)
+        }
+    }
+    private val inAppRevealRunnable = Runnable {
+        inAppRevealArmed = false
+        inAppRevealReady = true
+        val pending = inAppRevealPendingDistance
+        inAppRevealPendingDistance = 0f
+        if (pending <= 0f || inAppChromeOpacity >= 1f) return@Runnable
+        applyInAppChromeOpacity(
+            minOf(1f, inAppChromeOpacity + pending / 100f),
+            animated = true,
+        )
+    }
+    private val pendingSystemCallHandler = Handler(Looper.getMainLooper())
+    private var pendingSystemCallDispatchAttempt = 0
+    private var embeddedPwaUpdateReplayAttempt = 0
+    private val embeddedPwaUpdateReplayRunnable = object : Runnable {
+        override fun run() {
+            if (!useEmbeddedPwa || !::webView.isInitialized || !::embeddedPwaHost.isInitialized) {
+                embeddedPwaUpdateReplayAttempt = 0
+                return
+            }
+            val pending = embeddedPwaHost.bundleStore.pendingUpdateVersion()
+            if (pending.isNullOrBlank() || embeddedPwaUpdateReplayAttempt >= 8) {
+                embeddedPwaUpdateReplayAttempt = 0
+                return
+            }
+            embeddedPwaUpdateReplayAttempt += 1
+            Log.i(
+                "BeamioEmbeddedPwa",
+                "replaying pending OTA event attempt=$embeddedPwaUpdateReplayAttempt pending=$pending",
+            )
+            dispatchEmbeddedPwaUpdateAvailable(
+                embeddedPwaHost.bundleStore.activeVersion(),
+                pending,
+            )
+            pendingSystemCallHandler.postDelayed(
+                this,
+                minOf(2000L, 250L + embeddedPwaUpdateReplayAttempt * 250L),
+            )
+        }
+    }
+    private var mailboxWakeDispatchAttempt = 0
+    private val mailboxWakeDispatchRunnable = object : Runnable {
+        override fun run() {
+            if (!intent.getBooleanExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, false)) {
+                mailboxWakeDispatchAttempt = 0
+                return
+            }
+            if (mailboxWakeDispatchAttempt >= 12) {
+                Log.w("BeamioVoiceCall", "mailbox wake dispatch exhausted")
+                intent.removeExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL)
+                mailboxWakeDispatchAttempt = 0
+                return
+            }
+            mailboxWakeDispatchAttempt += 1
+            if (::webView.isInitialized) {
+                Log.i(
+                    "BeamioVoiceCall",
+                    "dispatching mailbox wake attempt=$mailboxWakeDispatchAttempt",
+                )
+                dispatchAndroidBridgeJsonToWeb(
+                    JSONObject()
+                        .put("action", "mailboxWake")
+                        .put("reason", "incomingCall"),
+                )
+            }
+            pendingSystemCallHandler.postDelayed(
+                this,
+                minOf(1500L, 250L + mailboxWakeDispatchAttempt * 125L),
+            )
+        }
+    }
+    private var showActiveCallDispatchAttempt = 0
+    private val showActiveCallRunnable = object : Runnable {
+        override fun run() {
+            if (!intent.getBooleanExtra(BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL, false)) {
+                showActiveCallDispatchAttempt = 0
+                return
+            }
+            if (!::webView.isInitialized) {
+                showActiveCallDispatchAttempt += 1
+                if (showActiveCallDispatchAttempt >= 12) {
+                    intent.removeExtra(BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL)
+                    showActiveCallDispatchAttempt = 0
+                } else {
+                    pendingSystemCallHandler.postDelayed(this, 250L)
+                }
+                return
+            }
+            showActiveCallDispatchAttempt += 1
+            Log.i(
+                "BeamioVoiceCall",
+                "dispatching showActiveVoiceCall attempt=$showActiveCallDispatchAttempt",
+            )
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject()
+                    .put("action", "showActiveVoiceCall")
+                    .put("callId", intent.getStringExtra(BeamioTelecomService.EXTRA_CALL_ID).orEmpty())
+                    .put("sessionId", intent.getStringExtra(BeamioTelecomService.EXTRA_SESSION_ID).orEmpty()),
+            )
+            if (showActiveCallDispatchAttempt >= 4) {
+                intent.removeExtra(BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL)
+                showActiveCallDispatchAttempt = 0
+                return
+            }
+            pendingSystemCallHandler.postDelayed(this, 350L)
+        }
+    }
+
+    private var lastShowActiveCallRequestAt = 0L
+
+    private fun requestShowActiveCall(source: Intent?) {
+        if (source?.getBooleanExtra(BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL, false) != true) return
+        if (BeamioActiveCallRoute.target(InCallScreenModel.isLive()) ==
+            BeamioActiveCallRoute.Target.NATIVE_IN_CALL
+        ) {
+            // The shell owns this call: the PWA has no screen for it.
+            intent.removeExtra(BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL)
+            source.removeExtra(BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL)
+            pendingSystemCallHandler.removeCallbacks(showActiveCallRunnable)
+            val snap = InCallScreenModel.snapshot()
+            Log.i("BeamioVoiceCall", "Show active call -> native call screen callIdPresent=${snap.callId.isNotBlank()}")
+            InCallActivity.present(this, snap.callId, snap.sessionId, tag = snap.tag, address = snap.address)
+            hideInCallReturnPillInternal()
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastShowActiveCallRequestAt < 1500L) return
+        lastShowActiveCallRequestAt = now
+        intent.putExtra(
+            BeamioTelecomService.EXTRA_SHOW_ACTIVE_CALL,
+            true,
+        )
+        intent.putExtra(
+            BeamioTelecomService.EXTRA_CALL_ID,
+            source.getStringExtra(BeamioTelecomService.EXTRA_CALL_ID).orEmpty(),
+        )
+        intent.putExtra(
+            BeamioTelecomService.EXTRA_SESSION_ID,
+            source.getStringExtra(BeamioTelecomService.EXTRA_SESSION_ID).orEmpty(),
+        )
+        showActiveCallDispatchAttempt = 0
+        pendingSystemCallHandler.removeCallbacks(showActiveCallRunnable)
+        pendingSystemCallHandler.post(showActiveCallRunnable)
+    }
+    private val pendingSystemCallDispatchRunnable = object : Runnable {
+        override fun run() {
+            val pending = BeamioTelecomService.peekPendingSystemCallAction(this@MainActivity)
+            if (pending == null || pendingSystemCallDispatchAttempt >= 12) {
+                pendingSystemCallDispatchAttempt = 0
+                return
+            }
+            pendingSystemCallDispatchAttempt += 1
+            dispatchPendingSystemCallAction()
+            pendingSystemCallHandler.postDelayed(
+                this,
+                minOf(1500L, 250L + pendingSystemCallDispatchAttempt * 125L),
+            )
+        }
+    }
+
+    @Volatile
+    private var useEmbeddedPwa = false
+
+    /** Consumer `beamio://open?…` → HTTPS `/app/` until WebView is mounted. */
+    @Volatile
+    private var pendingDeepLinkHttps: Uri? = null
+
+    /** An explicit intent deep link already drove the WebView; a later install-referrer link must not replace it. */
+    @Volatile
+    private var deepLinkApplied = false
+
+    private val bootstrapExecutor = Executors.newSingleThreadExecutor()
+
+    private var fullScreenIntentSettingsLaunched = false
+    private var overlayAccessDialog: androidx.appcompat.app.AlertDialog? = null
+
+    /** WebView getUserMedia 与 [onPermissionRequest] 同时到达时需先跑完系统 CAMERA / RECORD_AUDIO */
+    private var pendingWebPermissionRequest: PermissionRequest? = null
+    /** Resources of [pendingWebPermissionRequest] the shell allows ([BeamioWebMicGate]). */
+    private var pendingWebPermissionResources: Array<String> = emptyArray()
+    private var pendingFileBytes: ByteArray? = null
+    private var pendingFileRequestId: String = ""
+    private var pendingFileChooserCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingFileChooserCameraUri: Uri? = null
+    private var pendingCameraRequestId: String = ""
+    private var pendingCameraOutputUri: Uri? = null
+
+    private var nfcAdapter: NfcAdapter? = null
+
+    /** 前台优先接收 NFC，阻断系统 Tag Dispatcher（避免后台打开浏览器等）：贴卡只消费、不冒泡（GAP-17 后没有读卡会话）。 */
+    private var nfcForegroundPendingIntent: PendingIntent? = null
+
+
+    @Volatile
+    private var pendingQrScanRequestId: String? = null
+
+    @Volatile
+    private var pendingQrScanAction: String = "scanQr"
+
+    @Volatile
+    private var pendingQrScanFilter: String = GeneralQRScannerActivity.FILTER_ANY
+
+    private var pendingQrScanStartedAtMs: Long = 0L
+    private var pendingQrScanTransientRetryCount: Int = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val enableNfcForegroundDispatchRunnable = Runnable { maybeEnableNfcForegroundDispatch() }
+
+    private val requestWebViewMediaPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { _ ->
+        val req = pendingWebPermissionRequest
+        val resources = pendingWebPermissionResources
+        pendingWebPermissionRequest = null
+        pendingWebPermissionResources = emptyArray()
+        if (req == null) return@registerForActivityResult
+        grantWebViewMediaRequest(req, resources)
+    }
+
+    /** Native Accept path (no WebView getUserMedia) — mic for PCM uplink. */
+    private val requestNativeVoiceMicPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        Log.i(TAG, "native voice RECORD_AUDIO granted=$granted")
+        if (granted) {
+            BeamioNativeVoiceChannel.retryCaptureAfterMicPermission()
+        } else {
+            Log.w(TAG, "native voice RECORD_AUDIO denied — media uplink silent")
+        }
+    }
+
+    private fun ensureMicForVoiceUplink() {
+        BeamioVoiceMicPermission.requestIfNeeded(this, requestNativeVoiceMicPermission) {
+            BeamioNativeVoiceChannel.retryCaptureAfterMicPermission()
+        }
+    }
+
+    private val requestNativeCameraPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val requestId = pendingCameraRequestId
+        pendingCameraRequestId = ""
+        if (granted) {
+            launchNativeVideoCapture(requestId)
+        } else {
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject().put("action", "cameraCapture").put("ok", false)
+                    .put("requestId", requestId).put("error", "camera_permission_denied"),
+            )
+        }
+    }
+
+    private val nativeCameraLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val requestId = pendingCameraRequestId
+        val outputUri = pendingCameraOutputUri
+        pendingCameraRequestId = ""
+        pendingCameraOutputUri = null
+        if (result.resultCode != RESULT_OK || outputUri == null) {
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject().put("action", "cameraCapture").put("ok", false)
+                    .put("requestId", requestId).put("error", "cancelled"),
+            )
+            return@registerForActivityResult
+        }
+        dispatchVideoUriToWeb(outputUri, requestId)
+    }
+
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val callback = pendingFileChooserCallback
+        pendingFileChooserCallback = null
+        val cameraUri = pendingFileChooserCameraUri
+        pendingFileChooserCameraUri = null
+        if (result.resultCode != RESULT_OK) {
+            callback?.onReceiveValue(null)
+            return@registerForActivityResult
+        }
+        if (cameraUri != null) {
+            callback?.onReceiveValue(arrayOf(cameraUri))
+            return@registerForActivityResult
+        }
+        val data = result.data
+        val selectedUris = buildList {
+            val clipData = data?.clipData
+            if (clipData != null) {
+                for (index in 0 until clipData.itemCount) {
+                    clipData.getItemAt(index).uri?.let(::add)
+                }
+            } else {
+                data?.data?.let(::add)
+            }
+        }
+        callback?.onReceiveValue(selectedUris.takeIf { it.isNotEmpty() }?.toTypedArray())
+    }
+
+    private val generalQrScannerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val requestId = pendingQrScanRequestId.orEmpty()
+        val bridgeAction = pendingQrScanAction
+        val filter = pendingQrScanFilter
+        val elapsedMs = SystemClock.elapsedRealtime() - pendingQrScanStartedAtMs
+        val explicitError = result.data?.getStringExtra(GeneralQRScannerActivity.RESULT_ERROR)
+        pendingQrScanRequestId = null
+        pendingQrScanAction = "scanQr"
+        pendingQrScanFilter = GeneralQRScannerActivity.FILTER_ANY
+
+        when {
+            result.resultCode == RESULT_OK -> {
+                pendingQrScanTransientRetryCount = 0
+                val text = result.data?.getStringExtra(GeneralQRScannerActivity.RESULT_TEXT)?.trim().orEmpty()
+                if (text.isNotEmpty()) {
+                    dispatchAndroidBridgeJsonToWeb(
+                        JSONObject()
+                            .put("action", bridgeAction)
+                            .put("ok", true)
+                            .put("requestId", requestId)
+                            // Spec r3dk §25.52BM.1 and CRED (PM R697/R709): a recovery code is never returned over the bridge.
+                            // scanRecoveryQr is gone (PM R820), so only general scans reach here.
+                            .put("text", text),
+                    )
+                } else {
+                    dispatchAndroidBridgeScanError(requestId, bridgeAction, "qr_not_found")
+                }
+            }
+            explicitError == null && elapsedMs in 0L..1200L && pendingQrScanTransientRetryCount < 1 -> {
+                pendingQrScanTransientRetryCount += 1
+                mainHandler.post {
+                    launchGeneralQrScanner(
+                        requestId = requestId,
+                        bridgeAction = bridgeAction,
+                        filter = filter,
+                    )
+                }
+            }
+            else -> {
+                pendingQrScanTransientRetryCount = 0
+                dispatchAndroidBridgeScanError(requestId, bridgeAction, explicitError ?: "cancelled")
+            }
+        }
+    }
+
+    /** Native wallet import page (spec 25.25). After an import (or "already exists") the web page reloads to check again. */
+    private var nativeKeyImportShowing = false
+    private val nativeKeyImportLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        nativeKeyImportShowing = false
+        if (result.resultCode == RESULT_OK && ::webView.isInitialized) webView.reload()
+    }
+
+    /** Held here (the route keeps only a weak reference) and registered for the SDK's NativeImportHost launcher. */
+    private val nativeKeyImportOpener: () -> Boolean = {
+        if (isFinishing || isDestroyed) {
+            false
+        } else {
+            runOnUiThread {
+                if (!nativeKeyImportShowing && !isFinishing && !isDestroyed) {
+                    nativeKeyImportShowing = true
+                    nativeKeyImportLauncher.launch(Intent(this, NativeKeyImportActivity::class.java))
+                }
+            }
+            true
+        }
+    }
+
+    /**
+     * Shell gate (spec 25.26.4b, T-161): with no native key on the device (G0) the gated entries answer `no_key` and
+     * return before reading their argument. Returns true when the entry must stop.
+     */
+    /**
+     * Spec §25.52BU.2 / §25.52BX.1 (PM R716): a page URL with a key-shaped part is not opened and produces no event; the
+     * page gets one `{type:"ack", reqId, ok:false, error:"key_shaped_content"}`. The URL is never echoed or logged.
+     */
+    /**
+     * PM R756/R758: the embedded WebView carries CashTreesAndroid and the BeamioChat/BeamioShellRecord channels, so a
+     * top-level navigation (including window.open, which loads in place because multiple windows are off) to any origin
+     * other than the embedded page never loads here. http(s) goes to the external browser after the URL key-shape check;
+     * other schemes are left to the existing handling. Returns true when the navigation was taken over.
+     */
+    private fun leaveEmbeddedForExternal(url: String): Boolean {
+        val origin = ChatOriginGate.originOf(url) ?: return false
+        if (origin == ChatOriginGate.TRUSTED) return false
+        val scheme = origin.substringBefore("://")
+        if (scheme != "http" && scheme != "https") return false
+        if (UrlSecretCheck.ruleFor(url) != null) {
+            if (BuildConfig.DEBUG) android.util.Log.i("BeamioUrlCheck", "top-level navigation refused rule=${UrlSecretCheck.ruleFor(url)}")
+            return true
+        }
+        runOnUiThread { openExternalUrlFromBridge(url) }
+        return true
+    }
+
+    private fun refuseKeyShapedUrl(url: String, reqId: Any?): Boolean {
+        val rule = UrlSecretCheck.ruleFor(url) ?: return false
+        if (BuildConfig.DEBUG) android.util.Log.i("BeamioUrlCheck", "refused rule=$rule")
+        val ack = JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", false).put("error", UrlSecretCheck.ERROR)
+        runOnUiThread { dispatchAndroidBridgeJsonToWeb(ack) }
+        return true
+    }
+
+    private fun shellNoKey(entry: String): Boolean {
+        val code = ShellNoKeyGate.answer(entry) ?: return false
+        // Debug and QA builds only (audit, R675 review): names and codes, never payloads.
+        if (BuildConfig.DEBUG) android.util.Log.i("BeamioShellGate", "entry=$entry code=$code")
+        runOnUiThread {
+            dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", entry).put("ok", false).put("error", code))
+        }
+        return true
+    }
+
+    private val createFileDocumentLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val bytes = pendingFileBytes
+        pendingFileBytes = null
+        val requestId = pendingFileRequestId
+        pendingFileRequestId = ""
+        if (uri != null && bytes != null) {
+            try {
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "saveFile").put("ok", true).put("requestId", requestId))
+            } catch (_: Exception) {
+                dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "saveFile").put("ok", false).put("requestId", requestId).put("error", "file_write_failed"))
+            }
+        } else {
+            dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "saveFile").put("ok", false).put("requestId", requestId).put("error", "cancelled"))
+        }
+    }
+
+    private fun androidPermissionsForWebMedia(resources: Array<String>): List<String> {
+        val perms = linkedSetOf<String>()
+        for (res in resources) {
+            when (res) {
+                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> perms.add(Manifest.permission.CAMERA)
+                PermissionRequest.RESOURCE_AUDIO_CAPTURE -> perms.add(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+        return perms.toList()
+    }
+
+    private fun hasOsPermission(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun grantWebViewMediaRequest(request: PermissionRequest, resources: Array<String>) {
+        val allow = resources.filter { res ->
+            when (res) {
+                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> hasOsPermission(Manifest.permission.CAMERA)
+                PermissionRequest.RESOURCE_AUDIO_CAPTURE -> hasOsPermission(Manifest.permission.RECORD_AUDIO)
+                else -> false
+            }
+        }.toTypedArray()
+        if (allow.isEmpty()) {
+            CashTreesWebConsoleRelay.logNative(
+                "PermissionRequest deny resources=${request.resources.joinToString()} " +
+                    "camera=${hasOsPermission(Manifest.permission.CAMERA)} " +
+                    "mic=${hasOsPermission(Manifest.permission.RECORD_AUDIO)}",
+            )
+            request.deny()
+        } else {
+            CashTreesWebConsoleRelay.logNative(
+                "PermissionRequest grant=${allow.joinToString()} " +
+                    "requested=${request.resources.joinToString()}",
+            )
+            request.grant(allow)
+        }
+    }
+
+    private val webChromeClient: WebChromeClient = object : WebChromeClient() {
+        override fun onShowFileChooser(
+            webView: WebView?,
+            filePathCallback: ValueCallback<Array<Uri>>?,
+            fileChooserParams: FileChooserParams?,
+        ): Boolean {
+            pendingFileChooserCallback?.onReceiveValue(null)
+            pendingFileChooserCallback = filePathCallback
+            pendingFileChooserCameraUri = null
+            if (filePathCallback == null || fileChooserParams == null) {
+                pendingFileChooserCallback = null
+                return false
+            }
+            return try {
+                val acceptsVideo = fileChooserParams.acceptTypes.any {
+                    it.lowercase().contains("video")
+                }
+                val intent = if (fileChooserParams.isCaptureEnabled && acceptsVideo) {
+                    createVideoCaptureIntent().also { pendingFileChooserCameraUri = pendingCameraOutputUri }
+                } else {
+                    fileChooserParams.createIntent().apply {
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                }
+                fileChooserLauncher.launch(intent)
+                true
+            } catch (_: Exception) {
+                pendingFileChooserCallback = null
+                pendingFileChooserCameraUri = null
+                false
+            }
+        }
+
+        override fun onPermissionRequest(request: PermissionRequest) {
+            runOnUiThread {
+                // The shell records its calls itself: the WebView microphone is
+                // only for a call the PWA runs (it used to stay open after
+                // ringing, blocking the camera's recorder).
+                val resources = BeamioWebMicGate.allowedResources(
+                    request.resources,
+                    BeamioWebMicGate.pwaCallLive(
+                        telecomCallLive = BeamioTelecomService.hasLiveCall(),
+                        nativeCallLive = InCallScreenModel.isLive(),
+                    ),
+                )
+                if (BeamioWebMicGate.refusesMicrophone(request.resources, resources)) {
+                    CashTreesWebConsoleRelay.logNative(
+                        "PermissionRequest mic refused; no PWA-owned call resources=${request.resources.joinToString()}",
+                    )
+                }
+                if (resources.isEmpty()) {
+                    request.deny()
+                    return@runOnUiThread
+                }
+                val needed = androidPermissionsForWebMedia(resources)
+                if (needed.isEmpty()) {
+                    CashTreesWebConsoleRelay.logNative(
+                        "PermissionRequest deny empty-needed resources=${request.resources.joinToString()}",
+                    )
+                    request.deny()
+                    return@runOnUiThread
+                }
+                val missing = needed.filterNot(::hasOsPermission)
+                if (missing.isEmpty()) {
+                    grantWebViewMediaRequest(request, resources)
+                } else {
+                    CashTreesWebConsoleRelay.logNative(
+                        "PermissionRequest requesting OS perms missing=${missing.joinToString()} " +
+                            "resources=${request.resources.joinToString()}",
+                    )
+                    pendingWebPermissionRequest = request
+                    pendingWebPermissionResources = resources
+                    requestWebViewMediaPermissions.launch(missing.toTypedArray())
+                }
+            }
+        }
+
+        /** Fallback: Chromium-native console lines (subframes / pre-bridge). */
+        override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+            consoleMessage ?: return false
+            CashTreesWebConsoleRelay.handleWebViewConsoleMessage(
+                line = consoleMessage.message() ?: "",
+                level = consoleMessage.messageLevel(),
+                source = consoleMessage.sourceId(),
+                lineNumber = consoleMessage.lineNumber(),
+            )
+            return false
+        }
+    }
+
+    private fun createVideoCaptureIntent(): Intent {
+        val directory = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        val outputFile = File.createTempFile("beamio-camera-", ".mp4", directory)
+        val outputUri = FileProvider.getUriForFile(
+            this,
+            "${applicationContext.packageName}.fileprovider",
+            outputFile,
+        )
+        pendingCameraOutputUri = outputUri
+        return Intent(android.provider.MediaStore.ACTION_VIDEO_CAPTURE).apply {
+            putExtra(android.provider.MediaStore.EXTRA_OUTPUT, outputUri)
+            putExtra(android.provider.MediaStore.EXTRA_VIDEO_QUALITY, 1)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    private fun launchNativeVideoCapture(requestId: String) {
+        try {
+            val intent = createVideoCaptureIntent().apply {
+                putExtra("android.intent.extra.durationLimit", 120)
+            }
+            pendingCameraRequestId = requestId
+            nativeCameraLauncher.launch(intent)
+        } catch (_: Exception) {
+            pendingCameraRequestId = ""
+            pendingCameraOutputUri = null
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject().put("action", "cameraCapture").put("ok", false)
+                    .put("requestId", requestId).put("error", "camera_unavailable"),
+            )
+        }
+    }
+
+    private fun dispatchVideoUriToWeb(uri: Uri, requestId: String) {
+        // Do not inject the complete video data URL into WebView. Large
+        // evaluateJavascript payloads can be rejected after recording, leaving
+        // the PWA with a generic camera error. Read off the UI thread, then
+        // deliver the base64 body using the same chunk protocol as iOS.
+        Thread {
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes == null || bytes.isEmpty()) throw IllegalStateException("empty_video")
+                val mime = contentResolver.getType(uri) ?: "video/mp4"
+                val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                val chunkSize = 64 * 1024
+
+                val payloads = mutableListOf<JSONObject>()
+                payloads += JSONObject()
+                    .put("action", "cameraCaptureStart")
+                    .put("ok", true)
+                    .put("requestId", requestId)
+                    .put("mimeType", mime)
+                    var offset = 0
+                    var chunkIndex = 0
+                    while (offset < encoded.length) {
+                        val end = minOf(offset + chunkSize, encoded.length)
+                        payloads += JSONObject()
+                            .put("action", "cameraCaptureChunk")
+                            .put("requestId", requestId)
+                            .put("index", chunkIndex)
+                            .put("data", encoded.substring(offset, end))
+                        offset = end
+                        chunkIndex += 1
+                    }
+                    payloads += JSONObject()
+                        .put("action", "cameraCaptureEnd")
+                        .put("ok", true)
+                        .put("requestId", requestId)
+                    runOnUiThread { dispatchAndroidBridgeJsonSequenceToWeb(payloads) }
+            } catch (_: Exception) {
+                runOnUiThread {
+                    dispatchAndroidBridgeJsonToWeb(
+                        JSONObject().put("action", "cameraCapture").put("ok", false)
+                            .put("requestId", requestId).put("error", "video_read_failed"),
+                    )
+                }
+            } finally {
+                try {
+                    contentResolver.delete(uri, null, null)
+                } catch (_: Exception) {
+                }
+            }
+        }.start()
+    }
+
+    private fun hasNfcPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.NFC) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun queryNfcStatus(): String {
+        if (!hasNfcPermission()) return NfcStatusStrings.PERMISSION_DENIED
+        val adapter = NfcAdapter.getDefaultAdapter(this) ?: return NfcStatusStrings.NO_HARDWARE
+        return if (adapter.isEnabled) NfcStatusStrings.READY else NfcStatusStrings.DISABLED
+    }
+
+    /** @return `PendingIntent.FLAG_ALLOW_BACKGROUND_ACTIVITY_START` if present on device, else 0 */
+    private fun pendingIntentAllowBackgroundActivityStartFlag(): Int {
+        if (Build.VERSION.SDK_INT < 34) return 0
+        return try {
+            PendingIntent::class.java.getField("FLAG_ALLOW_BACKGROUND_ACTIVITY_START").getInt(null)
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    private fun createNfcForegroundPendingIntent(): PendingIntent {
+        nfcForegroundPendingIntent?.let { return it }
+        val launch = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        var flags = PendingIntent.FLAG_UPDATE_CURRENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            flags = flags or PendingIntent.FLAG_MUTABLE
+        }
+        // Android 14+ OEM：NFC 服务用本 PI 投递 NDEF 时可能出现 BAL_BLOCK（logcat「Background activity launch blocked」）。
+        // 该 flag 在部分 SDK 的公开 android.jar 中不可见，故用反射读取运行时 framework 字段。
+        flags = flags or pendingIntentAllowBackgroundActivityStartFlag()
+        val pi = PendingIntent.getActivity(this, 0, launch, flags)
+        nfcForegroundPendingIntent = pi
+        return pi
+    }
+
+    /** 停止前台分发（onPause 等）。 */
+    private fun disableNfcForegroundDispatchQuiet() {
+        try {
+            NfcAdapter.getDefaultAdapter(this)?.disableForegroundDispatch(this)
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * App 在前台且非读卡会话时注册 Foreground Dispatch，优先于系统默认识别/浏览器打开 NDEF URI。
+     * 纯 PWA 流程外的贴卡仅在 [onNewIntent] 内消费，不向下游冒泡。
+     */
+    private fun maybeEnableNfcForegroundDispatch() {
+        if (!hasNfcPermission()) return
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this) ?: return
+        if (!adapter.isEnabled) return
+        try {
+            adapter.enableForegroundDispatch(
+                this,
+                createNfcForegroundPendingIntent(),
+                null,
+                null,
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+
+
+    private fun dispatchAndroidBridgeScanError(requestId: String, action: String, error: String) {
+        dispatchAndroidBridgeJsonToWeb(
+            JSONObject()
+                .put("action", action)
+                .put("ok", false)
+                .put("requestId", requestId)
+                .put("error", error),
+        )
+    }
+
+    /** PWA bridge results — same shape as iOS `cashtreesios` CustomEvent detail. */
+    private fun dispatchAndroidBridgeJsonToWeb(json: JSONObject, completion: (() -> Unit)? = null) {
+        if (!::webView.isInitialized) return
+        val payload = json.toString()
+        val js =
+            "(function(){try{var d=" + payload + ";" +
+                "window.dispatchEvent(new CustomEvent('cashtreesandroid',{detail:d}));" +
+                "if(d&&d.ok&&d.action==='scanQr'){try{window.focus&&window.focus();}catch(e){}}" +
+                "}catch(e){}})();"
+        webView.evaluateJavascript(js) { completion?.invoke() }
+    }
+
+    private fun dispatchAndroidBridgeJsonSequenceToWeb(payloads: List<JSONObject>) {
+        if (payloads.isEmpty() || !::webView.isInitialized) return
+        var index = 0
+        fun sendNext() {
+            if (index >= payloads.size) return
+            val payload = payloads[index++]
+            dispatchAndroidBridgeJsonToWeb(payload) { sendNext() }
+        }
+        sendNext()
+    }
+
+    private fun launchGeneralQrScanner(requestId: String, bridgeAction: String, filter: String) {
+        pendingQrScanRequestId = requestId
+        pendingQrScanAction = bridgeAction
+        pendingQrScanFilter = filter
+        pendingQrScanStartedAtMs = SystemClock.elapsedRealtime()
+        generalQrScannerLauncher.launch(
+            GeneralQRScannerActivity.launchIntent(this, filter),
+        )
+    }
+
+    /** Dial screen waiting for the page's offer (main thread only). */
+    private var pendingPreparedScreen: Pair<String, String>? = null
+    @Volatile private var preparedScreenTag = ""
+    private val preparedScreenHandler = Handler(Looper.getMainLooper())
+    private val preparedScreenTimeout = Runnable { presentPreparedScreen("timeout") }
+
+    private fun schedulePreparedScreen(prepareId: String, address: String) {
+        preparedScreenHandler.removeCallbacks(preparedScreenTimeout)
+        preparedScreenTag = ""
+        pendingPreparedScreen = prepareId to address
+        preparedScreenHandler.postDelayed(preparedScreenTimeout, PREPARED_SCREEN_MAX_WAIT_MS)
+    }
+
+    /**
+     * Show the waiting dial screen now. [reason]: offer (signal came), timeout or
+     * failed. Skipped when the prepared dial was cancelled meanwhile.
+     */
+    private fun presentPreparedScreen(reason: String, prepareId: String = "") {
+        val pending = pendingPreparedScreen ?: return
+        if (prepareId.isNotEmpty() && pending.first.isNotEmpty() && prepareId != pending.first) return
+        pendingPreparedScreen = null
+        preparedScreenHandler.removeCallbacks(preparedScreenTimeout)
+        if (!InCallScreenModel.isPrepared()) {
+            BeamioCallTiming.mark("ui-presented", "by=$reason skipped=not-prepared")
+            return
+        }
+        InCallActivity.present(this, "", "", tag = preparedScreenTag, address = pending.second)
+        BeamioCallTiming.mark("ui-presented", "by=$reason")
+    }
+
+    /** Drop a dial screen that was never shown. True when one was waiting. */
+    private fun dropPreparedScreen(prepareId: String, reason: String = "cancelled"): Boolean {
+        val pending = pendingPreparedScreen ?: return false
+        if (prepareId.isNotEmpty() && pending.first.isNotEmpty() && prepareId != pending.first) return false
+        pendingPreparedScreen = null
+        preparedScreenHandler.removeCallbacks(preparedScreenTimeout)
+        BeamioCallTiming.mark("ui-presented", "by=$reason")
+        return true
+    }
+
+    private open inner class CashTreesJsBridge {
+        /**
+         * Old update path (ota-integrity-plan N4): in the store build it answers "disabled" and does nothing else.
+         * There is no download, staging or unzip code behind it and no capability bit is declared. Internal OTA test builds
+         * (REMOTE_PWA_UPDATE, never store) promote the staged bundle instead; the result arrives as a `cashtreesandroid` event.
+         */
+        @JavascriptInterface
+        fun applyEmbeddedPwaUpdate(): String {
+            if (BuildConfig.REMOTE_PWA_UPDATE) {
+                runOnUiThread { applyEmbeddedPwaUpdateFromBridge() }
+                return JSONObject().put("action", "applyEmbeddedPwaUpdate").put("ok", true).put("async", true).toString()
+            }
+            val result = JSONObject().put("action", "applyEmbeddedPwaUpdate").put("ok", false).put("reason", "ota_disabled")
+            runOnUiThread { dispatchAndroidBridgeJsonToWeb(result) }
+            return result.toString()
+        }
+
+        @JavascriptInterface
+        fun getNfcStatus(): String = queryNfcStatus()
+
+        /** Raw QR payload for global search / deep links — mirrors iOS `CashTreesIOS.scanQr`. */
+        open fun scanQr(requestId: String) {
+            runOnUiThread {
+                launchGeneralQrScanner(
+                    requestId = requestId.trim(),
+                    bridgeAction = "scanQr",
+                    filter = GeneralQRScannerActivity.FILTER_ANY,
+                )
+            }
+        }
+
+        // scanRecoveryQr removed (PM R820, spec r3fr §25.52DR.4): no entry on either bridge; BeamioShell answers unknown_command.
+
+        /** Open http(s)/mailto/tel or catalog wallet schemes — mirrors iOS `CashTreesIOS.openURL`. */
+        open fun openURL(url: String) {
+            if (refuseKeyShapedUrl(url, null)) return
+            runOnUiThread { openExternalUrlFromBridge(url) }
+        }
+
+        /**
+         * Full-screen in-app WebView (bottom → top). Top Back closes; title = domain.
+         * Accepts a plain URL string or JSON `{"url":"…","requestId":"…"}`.
+         * On dismiss, PWA receives `cashtreesandroid` `{ action: "inAppBrowserClosed", … }`.
+         */
+        open fun openInAppBrowser(urlOrJson: String) {
+            runOnUiThread { openInAppBrowserFromBridge(urlOrJson) }
+        }
+
+        /** Save a PWA blob through Android's system document picker. */
+        open fun saveFile(json: String) {
+            runOnUiThread { saveFileFromBridge(json) }
+        }
+
+        /**
+         * Dial pressed in the PWA: show the native call screen ("Calling…")
+         * right away. The PWA still resolves routes and builds the offer, then
+         * sends `startSystemCall` with the same `prepareId`.
+         */
+        open fun prepareSystemCall(json: String) {
+            if (shellNoKey("prepareSystemCall")) return
+            runCatching { JSONObject(json) }.getOrNull()?.let {
+                BeamioCallTiming.begin(it.optString("dialId"), it.optLong("tapAt", 0L))
+            }
+            BeamioCallTiming.mark("prepare-received")
+            runOnUiThread {
+                BeamioCallTiming.mark("prepare-main")
+                val body = runCatching { JSONObject(json) }.getOrNull() ?: return@runOnUiThread
+                val prepareId = body.optString("prepareId").trim()
+                val peerAddress = body.optString("peerAddress").trim()
+                if (InCallScreenModel.isLive() && !InCallScreenModel.isPrepared()) {
+                    Log.i("BeamioVoiceCall", "prepareSystemCall skipped; a call is live")
+                    return@runOnUiThread
+                }
+                InCallScreenModel.beginPrepared(prepareId, peerAddress)
+                BeamioCallTiming.mark("prepared")
+                // The screen waits until the page has handed the signed, encrypted
+                // offer to us (`postPgpCiphertext` purpose voice-offer), at most
+                // 0.6 s: covering the WebView at once slowed the page's offer work
+                // (RC3b V5: dial → mailbox 5.6 s median, 1.4 s when it finished first).
+                schedulePreparedScreen(prepareId, peerAddress)
+                if (peerAddress.isNotBlank()) {
+                    Thread {
+                        val tag = BeamioCallerAvatarStore.tagFor(applicationContext, peerAddress)
+                            ?: runCatching { BeamioVoiceOfferIdentity.fetchExactTag(peerAddress) }
+                                .getOrNull().orEmpty()
+                        if (tag.isNotBlank()) {
+                            preparedScreenTag = tag
+                            InCallActivity.refreshIdentityIfShowing("", "", tag, peerAddress)
+                        }
+                    }.start()
+                }
+            }
+        }
+
+        /** The PWA could not start the prepared dial: close the prepared screen. */
+        open fun cancelPreparedSystemCall(json: String) {
+            if (shellNoKey("cancelPreparedSystemCall")) return
+            runOnUiThread {
+                val body = runCatching { JSONObject(json) }.getOrNull() ?: return@runOnUiThread
+                val prepareId = body.optString("prepareId").trim()
+                val error = body.optString("error").trim()
+                BeamioCallTiming.mark("prepare-cancelled", if (error.isEmpty()) "" else "failed")
+                // A failure still shows its reason, so show a screen still waiting first.
+                if (error.isNotEmpty()) presentPreparedScreen("failed", prepareId) else dropPreparedScreen(prepareId)
+                if (error.isNotEmpty()) {
+                    // Show why the dial failed on the call screen; End closes it.
+                    if (InCallScreenModel.failPrepared(prepareId, error)) {
+                        InCallActivity.refreshStateIfShowing()
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            if (InCallScreenModel.isPrepared() && InCallScreenModel.prepareError() == error &&
+                                InCallScreenModel.cancelPrepared()
+                            ) {
+                                InCallActivity.finishIfShowing()
+                            }
+                        }, 6_000L)
+                    }
+                } else if (InCallScreenModel.cancelPrepared(prepareId)) {
+                    Log.i("BeamioVoiceCall", "prepared call screen closed by PWA")
+                    InCallActivity.finishIfShowing()
+                }
+            }
+        }
+
+        open fun startSystemCall(json: String) {
+            if (shellNoKey("startSystemCall")) return
+            BeamioCallTiming.mark("start-received")
+            runOnUiThread {
+                BeamioCallTiming.mark("start-main")
+                val body = runCatching { JSONObject(json) }.getOrNull() ?: return@runOnUiThread
+                val callId = body.optString("callId")
+                val sessionId = body.optString("sessionId")
+                val peerAddress = body.optString("peerAddress")
+                val prepareId = body.optString("prepareId").trim()
+                // A dial (voice v3) carries dialerProto; the dialer opens no channel
+                // until the callee's accept arrives on our mailbox.
+                if (body.optInt("dialerProto", 0) != 3) {
+                    Log.w("BeamioVoiceCall", "startSystemCall ignored: not a v3 dial")
+                    return@runOnUiThread
+                }
+                if (InCallScreenModel.wasPrepareCancelled(prepareId)) {
+                    // The user hung up on the prepared screen before the offer
+                    // was ready. Do not ring the callee; let the PWA clean up.
+                    Log.i("BeamioVoiceCall", "startSystemCall dropped; dial was cancelled while preparing")
+                    MainActivity.dispatchSystemCallAction("callEnded", callId, sessionId, applicationContext)
+                    return@runOnUiThread
+                }
+                BeamioTelecomService.startOutgoing(
+                    this@MainActivity,
+                    callId,
+                    "Beamio",
+                    sessionId = sessionId,
+                )
+                BeamioNativeVoiceSignaling.attachOutgoingDialer(
+                    this@MainActivity,
+                    callId = callId,
+                    sessionId = sessionId,
+                    peerEoa = peerAddress,
+                    offerCreatedAtMs = body.optLong("offerCreatedAt", 0L),
+                )
+                // Inside the shell the dialer uses the same native call screen as
+                // the callee (the PWA hides its own call page).
+                run {
+                    // This shows the screen itself; a waiting prepared screen is no longer needed.
+                    dropPreparedScreen(prepareId, reason = "start")
+                    InCallScreenModel.beginOutgoing(callId, sessionId, peerAddress)
+                    InCallActivity.present(this@MainActivity, callId, sessionId, tag = "", address = peerAddress)
+                    Thread {
+                        val tag = BeamioCallerAvatarStore.tagFor(applicationContext, peerAddress)
+                            ?: runCatching { BeamioVoiceOfferIdentity.fetchExactTag(peerAddress) }
+                                .getOrNull().orEmpty()
+                        if (tag.isNotBlank()) {
+                            InCallActivity.refreshIdentityIfShowing(callId, sessionId, tag, peerAddress)
+                        }
+                    }.start()
+                }
+            }
+        }
+
+        /**
+         * The page asks whether incoming calls the caller ended rang on this phone
+         * ({calls:[{callId, sessionId, createdAt}]}). One incomingCallOutcome event
+         * per call: rang true / false, or no rang field when this phone cannot know.
+         */
+        /**
+         * The page hands over its contacts' tags and pre-drawn avatars
+         * ({rows:[{address, tag, png}]}), so a call window never looks them up online.
+         */
+        open fun cacheCallerAvatars(json: String) {
+            if (shellNoKey("cacheCallerAvatars")) return
+            val rows = runCatching { JSONObject(json).optJSONArray("rows") }.getOrNull() ?: return
+            val app = applicationContext
+            Thread { runCatching { BeamioCallerAvatarStore.put(app, rows) } }.start()
+        }
+
+        open fun queryIncomingCallOutcome(json: String) {
+            if (shellNoKey("queryIncomingCallOutcome")) return
+            // r3gi §25.52EF: shared rules with window.BeamioShell (see handleShellCall); the legacy entry has no ack, so a shape
+            // error (bad_args there) sends nothing here.
+            val args = runCatching { JSONObject(json) }.getOrNull() ?: return
+            val app = applicationContext
+            val r = IncomingCallOutcome.evaluate(args, System.currentTimeMillis()) { c, sId -> BeamioTelecomService.hasRangPair(app, c, sId) }
+            if (r !is IncomingCallOutcome.Result.Events) { Log.i("BeamioVoiceCall", "incoming call outcome query bad_args"); return }
+            Log.i("BeamioVoiceCall", "incoming call outcome query calls=${r.events.size}")
+            runOnUiThread { r.events.forEach { dispatchAndroidBridgeJsonToWeb(it) } }
+        }
+
+        open fun reportIncomingSystemCall(json: String) {
+            if (shellNoKey("reportIncomingSystemCall")) return
+            Log.i("BeamioVoiceCall", "WebView reportIncomingSystemCall received")
+            runOnUiThread {
+                val body = runCatching { JSONObject(json) }.getOrElse {
+                    Log.e("BeamioVoiceCall", "Invalid reportIncomingSystemCall JSON", it)
+                    return@runOnUiThread
+                }
+                val callId = body.optString("callId").trim()
+                val sessionId = body.optString("sessionId").trim()
+                val peerAddress = body.optString("peerAddress").trim()
+                val to = body.optString("to").trim()
+                val offerProto = body.optInt("proto", 0)
+                Log.i(
+                    "BeamioVoiceCall",
+                    "WebView incoming call payload parsed callIdPresent=" +
+                        callId.isNotBlank() +
+                        " sessionIdPresent=" + sessionId.isNotBlank() +
+                        " v3=" + (offerProto == 3),
+                )
+                Log.i(
+                    "BeamioVoiceCall",
+                    "WebView incoming caller fields displayNamePresent=" +
+                        body.optString("displayName").isNotBlank() +
+                        " peerAddressPresent=" +
+                        peerAddress.isNotBlank() +
+                        " claimedTagPresent=" +
+                        body.optString("claimedTag").isNotBlank(),
+                )
+                // The PWA already verified the v3 offer: cache the caller's keys, so
+                // Telecom Answer / Decline need not wait for the mailbox fetch.
+                if (callId.isNotBlank() && offerProto == 3) {
+                    val tag = body.optString("claimedTag").trim()
+                        .ifBlank { body.optString("displayName").trim() }
+                        .takeIf { it.isNotBlank() && !it.equals("Beamio", ignoreCase = true) }
+                    val pageOffer = BeamioVoiceOfferIdentity.ResolvedIdentity(
+                        callerEoa = peerAddress,
+                        beamioTag = tag,
+                        shortAddress = if (peerAddress.length >= 10) {
+                            peerAddress.take(6) + "…" + peerAddress.takeLast(4)
+                        } else {
+                            peerAddress
+                        },
+                        callId = callId,
+                        sessionId = sessionId,
+                        to = to,
+                        proto = offerProto,
+                        callerPgpArmored = BeamioVoiceOfferIdentity.decodeArmor(body.optString("callerPgp", "")),
+                        callerRouteArmored = BeamioVoiceOfferIdentity.decodeArmor(body.optString("callerRoute", "")),
+                    )
+                    BeamioNativeVoiceSignaling.rememberOffer(pageOffer)
+                    // The page reports only offers that still ring: wake receipt to the caller.
+                    BeamioNativeVoiceSignaling.sendRingingIfNeeded(applicationContext, pageOffer)
+                }
+                BeamioTelecomService.reportIncoming(
+                    this@MainActivity,
+                    callId,
+                    peerAddress,
+                    body.optString("displayName").ifBlank { peerAddress },
+                    sessionId,
+                    body.optString("claimedTag"),
+                    body.optString("claimedAddress"),
+                    body.optString("identityWarning"),
+                )
+            }
+        }
+
+        /** PWA banner: re-send the push delivery check (its listener just mounted). */
+        @JavascriptInterface
+        fun requestDeliveryHealth() {
+            runOnUiThread { publishDeliveryHealth() }
+        }
+
+        /** PWA banner "Fix in Settings": Samsung Never sleeping apps, or the app info page. */
+        @JavascriptInterface
+        fun openDeliverySettings() {
+            runOnUiThread {
+                val opened = BeamioDeliveryHealth.openFixSettings(this@MainActivity)
+                Log.i("BeamioDeliveryHealth", "open settings -> $opened")
+            }
+        }
+
+        /** PWA banner closed: hide the force-stop notice for this stop. */
+        @JavascriptInterface
+        fun dismissDeliveryHealthNotice() {
+            BeamioDeliveryHealth.dismissForceStop(applicationContext)
+            runOnUiThread { publishDeliveryHealth() }
+        }
+
+        // requestPendingSystemCallAction removed (PM R680, spec r3dg §25.52BI.1): no page version calls it.
+
+        open fun endSystemCall(json: String) {
+            if (shellNoKey("endSystemCall")) return
+            runOnUiThread {
+                val body = runCatching { JSONObject(json) }.getOrNull() ?: return@runOnUiThread
+                val callId = body.optString("callId")
+                val sessionId = body.optString("sessionId")
+                Log.i(
+                    "BeamioVoiceCall",
+                    "endSystemCall bridge callIdPresent=${callId.isNotBlank()} " +
+                        "sessionIdPresent=${sessionId.isNotBlank()}",
+                )
+                BeamioTelecomService.end(
+                    this@MainActivity,
+                    callId.ifBlank { sessionId },
+                    sessionId,
+                )
+            }
+        }
+
+        /** Native video capture for the Chat Camera action. Android JS interfaces receive strings only. */
+        open fun requestCameraCapture(json: String) {
+            runOnUiThread {
+                val requestId = try {
+                    JSONObject(json).optString("requestId", "")
+                } catch (_: Exception) {
+                    ""
+                }
+                if (!hasOsPermission(Manifest.permission.CAMERA)) {
+                    pendingCameraRequestId = requestId
+                    requestNativeCameraPermission.launch(Manifest.permission.CAMERA)
+                } else {
+                    launchNativeVideoCapture(requestId)
+                }
+            }
+        }
+
+        /**
+         * PWA catalog install probe. JSON `{ requestId, queries:[{ id, schemes[], packages[] }] }`.
+         * Returns a JSON array of installed `id`s. Empty / bad JSON → MetaMask / Coinbase Wallet.
+         */
+        open fun queryInstalledApps(json: String): String {
+            return try {
+                val obj = JSONObject(json)
+                val queries = obj.optJSONArray("queries")
+                if (queries == null || queries.length() == 0) {
+                    return legacyInstalledWalletIds().toString()
+                }
+                val ids = JSONArray()
+                for (i in 0 until queries.length()) {
+                    val q = queries.optJSONObject(i) ?: continue
+                    val id = q.optString("id").trim().lowercase()
+                    if (id.isEmpty()) continue
+                    val packages = q.optJSONArray("packages") ?: continue
+                    var installed = false
+                    var j = 0
+                    while (j < packages.length()) {
+                        val pkg = packages.optString(j).trim()
+                        if (pkg.isNotEmpty() && isWalletPackageInstalled(pkg)) {
+                            installed = true
+                            break
+                        }
+                        j += 1
+                    }
+                    if (installed) ids.put(id)
+                }
+                ids.toString()
+            } catch (_: Exception) {
+                legacyInstalledWalletIds().toString()
+            }
+        }
+
+        /** Alias of [queryInstalledApps] (PM R709, spec §25.52BD.1): same work, same (ungated) no_key state as iOS. */
+        open fun listInstalledWalletApps(): String = queryInstalledApps("{}")
+
+        /** Alias of [queryInstalledApps] with the same `{ requestId?, queries? }` payload. */
+        open fun listInstalledWalletApps(json: String): String = queryInstalledApps(json)
+
+        /** Embedded PWA OTA — mirrors iOS `CashTreesIOS.getEmbeddedPwaVersion`. */
+        @JavascriptInterface
+        fun getEmbeddedPwaVersion(): String {
+            if (!useEmbeddedPwa || !::embeddedPwaHost.isInitialized) return ""
+            return embeddedPwaHost.bundleStore.activeVersion()
+        }
+
+        /** Embedded PWA OTA — mirrors iOS `CashTreesIOS.getEmbeddedPwaPendingVersion`. */
+        @JavascriptInterface
+        fun getEmbeddedPwaPendingVersion(): String {
+            if (!useEmbeddedPwa || !::embeddedPwaHost.isInitialized) return ""
+            return embeddedPwaHost.bundleStore.pendingUpdateVersion() ?: ""
+        }
+
+
+
+        /**
+         * PWA → Native generic app state (footer badges, launcher icon badge).
+         * Payload: JSON string `{ action:'publishAppState', state:{...} }` — mirrors iOS bridge.
+         */
+        @JavascriptInterface
+        fun publishAppState(json: String) {
+            runOnUiThread {
+                CashTreesNativeAppStateBridge.applyFromJsonString(this@MainActivity, json)
+            }
+        }
+
+        /**
+         * PWA entered Chat (already foreground): drop offline FCM / local chat tray alerts.
+         * Does not change unread — caller re-`publishAppState` badge if needed.
+         */
+        @JavascriptInterface
+        fun clearOfflineChatAlerts() {
+            if (shellNoKey("clearOfflineChatAlerts")) return
+            runOnUiThread {
+                CashTreesNativeAppStateBridge.clearOfflineChatAlerts(this@MainActivity)
+            }
+        }
+
+        /**
+         * PWA still running behind Home: local system notification + badge (not FCM).
+         * Payload: JSON string `{ badge, title?, body? }`.
+         */
+        @JavascriptInterface
+        fun notifyBackgroundChat(json: String) {
+            if (shellNoKey("notifyBackgroundChat")) return
+            runOnUiThread {
+                CashTreesNativeAppStateBridge.notifyBackgroundChatFromJson(this@MainActivity, json)
+            }
+        }
+
+        /**
+         * Bind EOA for FCM registration — mirrors iOS `CashTreesIOS.bindPushIdentity`.
+         * Payload: JSON string `{ eoa, pgpKeyId? }`.
+         */
+        open fun bindPushIdentity(json: String) {
+            if (shellNoKey("bindPushIdentity")) return
+            runOnUiThread {
+                CashTreesPushRegistration.bindIdentityFromJson(this@MainActivity, json)
+            }
+        }
+
+        // setNativeChatPgpSecrets removed (PM R679, 2026-11-14): PGP secrets never cross the bridge (iOS removed the same entry).
+
+        /** Voice v3: route keys of all nodes (public), cached for picking relays. */
+        open fun setNativeVoiceRelayNodes(json: String) {
+            if (shellNoKey("setNativeVoiceRelayNodes")) return
+            val app = applicationContext
+            Thread { BeamioVoiceV3.RelayNodes.saveFromBridge(app, json) }.start()
+        }
+
+        /** Persist Guardian IP roster without re-sending the user PGP private key. */
+        open fun setNativeSiNodeRoster(json: String) {
+            if (shellNoKey("setNativeSiNodeRoster")) return
+            val ok = BeamioChatPgpStore.upsertRoster(this@MainActivity, json)
+            Log.i(TAG, "setNativeSiNodeRoster ok=$ok")
+        }
+
+        /**
+         * PWA ciphertext delivery. The shell picks `http://{ip}/post`.
+         * Payload: `{ requestId, data, excludeIps? }`. Reply via `cashtreesandroid`.
+         */
+        open fun postPgpCiphertext(json: String) {
+            if (shellNoKey("postPgpCiphertext")) return
+            Thread {
+                try {
+                    val body = JSONObject(json.ifBlank { "{}" })
+                    val requestId = body.optString("requestId", "")
+                    val armor = body.optString("data", "")
+                    val exclude = HashSet<String>()
+                    val arr = body.optJSONArray("excludeIps")
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val ip = arr.optString(i, "").trim()
+                            if (ip.isNotEmpty()) exclude.add(ip)
+                        }
+                    }
+                    val mailbox = BeamioChatPgpStore.loadMailboxIp(this@MainActivity)
+                    if (mailbox.isNotBlank()) exclude.add(mailbox)
+                    if (body.optString("purpose") == "voice-offer") {
+                        // The page handed us the dial's offer: the call screen may cover it now.
+                        BeamioCallTiming.mark("offer-handed")
+                        runOnUiThread { presentPreparedScreen("offer") }
+                    }
+                    BeamioCallTiming.mark("post-pgp-start")
+                    val postStarted = System.currentTimeMillis()
+                    val result = BeamioSiCipherPost.post(
+                        armor,
+                        BeamioChatPgpStore.loadSiNodes(this@MainActivity),
+                        exclude,
+                    )
+                    BeamioCallTiming.mark("post-pgp-end", "ms=${System.currentTimeMillis() - postStarted} ok=${if (result.ok) 1 else 0}")
+                    runOnUiThread {
+                        dispatchAndroidBridgeJsonToWeb(
+                            JSONObject()
+                                .put("action", "postPgpCiphertext")
+                                .put("requestId", requestId)
+                                .put("ok", result.ok)
+                                .put("status", result.status)
+                                .put("body", result.body)
+                                .put("error", result.error),
+                        )
+                    }
+                } catch (error: Exception) {
+                    Log.w(TAG, "postPgpCiphertext failed: ${error.message}")
+                }
+            }.start()
+        }
+
+        /** PWA debug log → logcat (`PWA-JS` tag); mirrors iOS `CashTreesIOS.debugLog`. */
+        @JavascriptInterface
+        fun debugLog(level: String, message: String) {
+            CashTreesWebConsoleRelay.handleBridgeConsoleLog(level, message)
+        }
+
+        /**
+         * PWA opened getUserMedia successfully. Promote Telecom to ACTIVE now
+         * (MODE_IN_COMMUNICATION) instead of the Answer-time fallback timer.
+         */
+        open fun notifyVoiceMicReady(json: String) {
+            if (shellNoKey("notifyVoiceMicReady")) return
+            try {
+                val obj = JSONObject(json.ifBlank { "{}" })
+                val callId = obj.optString("callId", "").trim()
+                val sessionId = obj.optString("sessionId", "").trim()
+                BeamioTelecomService.notifyVoiceMicReady(callId, sessionId)
+            } catch (error: Exception) {
+                Log.w(TAG, "notifyVoiceMicReady parse failed: ${error.message}")
+            }
+        }
+
+        /**
+         * Record 16 kHz mono PCM outside WebView. WebView getUserMedia stays
+         * silent while Telecom holds MODE_IN_COMMUNICATION.
+         */
+        open fun startNativeVoiceMic(): Boolean {
+            if (shellNoKey("startNativeVoiceMic")) return false
+            stopNativeVoiceMic()
+            val mic = BeamioNativeVoiceMic { pcmBase64 ->
+                runOnUiThread {
+                    if (!::webView.isInitialized) return@runOnUiThread
+                    webView.evaluateJavascript(
+                        "window.__beamioNativeMicChunk&&window.__beamioNativeMicChunk('$pcmBase64')",
+                        null,
+                    )
+                }
+            }
+            if (!mic.start()) return false
+            nativeVoiceMic = mic
+            return true
+        }
+
+        open fun stopNativeVoiceMic() {
+            val mic = nativeVoiceMic
+            nativeVoiceMic = null
+            mic?.stop()
+        }
+
+        /**
+         * Native Conet Chat Module (`chat-sdk-android`, same contract as the iOS `ConetChatSDK`).
+         * True means the PWA must never spawn the TypeScript gossip Worker.
+         */
+        @JavascriptInterface
+        fun chatModuleAvailable(): Boolean = BeamioConetChatModule.isAvailable()
+
+        /**
+         * PWA → native WorkerCommand (`init`, `send`, `history*`, …) as a JSON string.
+         * Results come back as `cashtreesandroid` events:
+         * `{ action: "chatModuleEvent", event }` and `{ action: "chatModuleSignRequest", … }`.
+         */
+        open fun chatModuleCommand(json: String) {
+            // Origin first, then reqId (r3ej §25.52CJ.3, r3em CM.3, PM R756): an untrusted top-level page never reaches the SDK.
+            if (!ChatOriginGate.allowed(embeddedTopOrigin)) {
+                val refused = JSONObject().put("type", "ack").put("reqId", BridgeReqId.fromJsonText(json) ?: JSONObject.NULL)
+                    .put("ok", false).put("error", ChatOriginGate.ERROR)
+                runOnUiThread { dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "chatModuleEvent").put("event", refused)) }
+                return
+            }
+            handleChatCommand(json) { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }
+        }
+
+        /** PWA answer to a `chatModuleSignRequest`: `{ reqId, ok, signature?, error? }`. */
+        open fun chatModuleSignResponse(json: String) {
+            if (shellNoKey("chatModuleSignResponse")) return
+            try {
+                BeamioConetChatModule.fulfillSign(JSONObject(json))
+            } catch (_: Exception) {
+            }
+        }
+
+        @JavascriptInterface
+        fun chatModuleIsRunning(): Boolean = BeamioConetChatModule.isRunning()
+    }
+
+    /**
+     * Shared chat-module command path for the legacy CashTreesAndroid.chatModuleCommand (after its top-level origin gate)
+     * and the window.BeamioChat channel (after its origin and main-frame checks). [deliver] sends each payload
+     * (`{action:"chatModuleEvent", event}` or `{action:"chatModuleSignRequest", ...}`) back over the caller's channel; the SDK
+     * keeps the latest command's deliver for its later events.
+     */
+    /**
+     * window.BeamioShell (PM R789): one accepted call, already checked for origin, main frame, JSON, reqId and action.
+     * Refusals the old methods sent as `cashtreesandroid` events are answered on the channel instead, exactly once:
+     * the no-key gate (no_key / not_ready) and the URL check (key_shaped_content) run here before the method.
+     */
+    private fun handleShellCall(bridge: CashTreesJsBridge, c: BeamioShellChannel.Decision.Call): JSONObject {
+        val ack = BeamioShellChannel.ack(c.action, c.reqId)
+        ShellNoKeyGate.answer(c.action)?.let { code ->
+            if (BuildConfig.DEBUG) android.util.Log.i("BeamioShellGate", "entry=${c.action} code=$code channel=BeamioShell")
+            return ack.put("ok", false).put("error", code)
+        }
+        val url = when (c.action) {
+            "openURL" -> c.arg
+            "openInAppBrowser" -> c.args.optString("url", "")
+            else -> null
+        }
+        if (url != null) {
+            UrlSecretCheck.ruleFor(url)?.let { rule ->
+                Log.i(TAG, "url refused rule=$rule channel=BeamioShell")
+                return ack.put("ok", false).put("error", UrlSecretCheck.ERROR)
+            }
+        }
+        when (c.action) {
+            "openURL" -> bridge.openURL(c.arg)
+            "openInAppBrowser" -> bridge.openInAppBrowser(c.arg)
+            "queryInstalledApps" -> return ack.put("ok", true).put("result", JSONArray(bridge.queryInstalledApps(c.arg)))
+            "listInstalledWalletApps" -> return ack.put("ok", true).put("result", JSONArray(bridge.listInstalledWalletApps(c.arg)))
+            "scanQr" -> bridge.scanQr(c.arg)
+            "queryIncomingCallOutcome" -> {
+                // r3gi §25.52EF: ack first (posted by the channel right after this returns), then one event per entry.
+                val app = applicationContext
+                val (out, events) = IncomingCallOutcome.respond(c.reqId, c.args, System.currentTimeMillis()) { cId, sId ->
+                    BeamioTelecomService.hasRangPair(app, cId, sId)
+                }
+                if (events.isNotEmpty()) mainHandler.post { events.forEach { dispatchAndroidBridgeJsonToWeb(it) } }
+                return out
+            }
+            "notifyVoiceMicReady" -> bridge.notifyVoiceMicReady(c.arg)
+            "saveFile" -> bridge.saveFile(c.arg)
+            "requestCameraCapture" -> bridge.requestCameraCapture(c.arg)
+            "bindPushIdentity" -> bridge.bindPushIdentity(c.arg)
+            "postPgpCiphertext" -> bridge.postPgpCiphertext(c.arg)
+            "setNativeSiNodeRoster" -> bridge.setNativeSiNodeRoster(c.arg)
+            "setNativeVoiceRelayNodes" -> bridge.setNativeVoiceRelayNodes(c.arg)
+            "cacheCallerAvatars" -> bridge.cacheCallerAvatars(c.arg)
+            "prepareSystemCall" -> bridge.prepareSystemCall(c.arg)
+            "cancelPreparedSystemCall" -> bridge.cancelPreparedSystemCall(c.arg)
+            "startSystemCall" -> bridge.startSystemCall(c.arg)
+            "reportIncomingSystemCall" -> bridge.reportIncomingSystemCall(c.arg)
+            "endSystemCall" -> bridge.endSystemCall(c.arg)
+            "startNativeVoiceMic" -> return ack.put("ok", true).put("result", bridge.startNativeVoiceMic())
+            "stopNativeVoiceMic" -> bridge.stopNativeVoiceMic()
+            else -> return ack.put("ok", false).put("error", "unknown_command")
+        }
+        return ack.put("ok", true)
+    }
+
+    private fun handleChatCommand(json: String, deliver: (JSONObject) -> Unit) {
+        val body = try {
+            JSONObject(json)
+        } catch (_: Exception) {
+            // Spec r3cv §25.52AX.1 (r3cu §25.52AW.1): the shell parses first, so a request it cannot parse gets exactly one
+            // answer, with a null reqId, and nothing reaches the SDK.
+            val ack = JSONObject().put("type", "ack").put("reqId", JSONObject.NULL).put("ok", false).put("error", "bad_request")
+            val payload = JSONObject().put("action", "chatModuleEvent").put("event", ack)
+            deliver(payload)
+            return
+        }
+        // A send keeps the process running until the module answers it (see BeamioChatSendHold).
+        // QA DIAG (debug only): command type and reqId only; never other fields.
+        if (BuildConfig.DEBUG) android.util.Log.i("BeamioQaBridge", "cmd type=${body.optString("type")} reqId=${body.opt("reqId")}")
+        if (!QaWriteGuard.sdkCommandAllowed(body.optString("type"))) {
+            QaWriteGuard.log("guard blocked-sdk-command ${body.optString("type").take(40)}")
+            if (body.has("reqId")) {
+                val ack = JSONObject().put("type", "ack").put("reqId", body.opt("reqId")).put("ok", false).put("error", "qa_write_blocked")
+                val payload = JSONObject().put("action", "chatModuleEvent").put("event", ack)
+                deliver(payload)
+            }
+            return
+        }
+        BeamioChatSendHold.onCommand(applicationContext, body)
+        BeamioConetChatModule.handleCommand(applicationContext, body) { payload ->
+            if (BuildConfig.DEBUG) payload.optJSONObject("event")?.let { e ->
+                val t = e.optString("type")
+                if (t == "ack" || t == "ready" || t.startsWith("native") || t.startsWith("recovery")) {
+                    val eoa = e.optString("eoa").let { a -> if (a.length == 42) a.take(6) + "…" + a.takeLast(4) else "" } // public address, short form
+                    android.util.Log.i("BeamioQaBridge", "evt type=$t reqId=${e.opt("reqId")} ok=${e.opt("ok")} error=${e.optString("error")} code=${e.optString("code")} eoa=$eoa")
+                    e.optJSONObject("result")?.let { r ->
+                        // Key names, plus values of a few public status fields only; addresses in short form.
+                        val keys = r.keys().asSequence().toList().sorted()
+                        val pub = listOf("state", "status", "ready", "hasKey", "code", "kind").filter { r.has(it) }.joinToString(" ") { "$it=${r.opt(it)}" }
+                        val addr = listOf("eoa", "address").firstOrNull { r.optString(it).length == 42 }?.let { k -> r.optString(k).let { a -> "$k=" + a.take(6) + "…" + a.takeLast(4) } } ?: ""
+                        android.util.Log.i("BeamioQaBridge", "   result keys=$keys $pub $addr")
+                        r.optJSONArray("capabilities")?.let { c -> android.util.Log.i("BeamioQaBridge", "   capabilities=" + (0 until c.length()).joinToString(",") { c.optString(it) } + " sdkVersion=" + r.optString("sdkVersion")) }
+                    }
+                }
+            }
+            BeamioChatSendHold.onModuleEvent(payload)
+            deliver(payload)
+        }
+    }
+
+    private var qaEvalReceiver: android.content.BroadcastReceiver? = null
+
+    /** Origin of the embedded WebView's top-level page, set on onPageStarted/onPageFinished (ChatOriginGate). */
+    @Volatile private var embeddedTopOrigin: String? = null
+
+    /**
+     * QA write-guard builds only: service worker requests go through the same native backstop, and a controlled probe
+     * receiver (`<applicationId>.QA_EVAL`, extra `js`) runs a probe script in the page so the refusal can be shown
+     * without any real outside write. The probe result is logged redacted under the guard tag.
+     */
+    private fun installQaWriteGuardNativeHooks() {
+        // Debug QA builds only (src/debug QaWriteGuard); release and store compile a no-op stub (PM R675).
+        qaEvalReceiver = QaWriteGuard.installNativeHooks(this) { if (::webView.isInitialized) webView else null }
+    }
+
+    /** QA: the SDK's NativeAccountCreateHost.launcher opens the native account create page through this. */
+    private val nativeAccountCreateOpener: () -> Boolean = {
+        if (isFinishing || isDestroyed) false
+        else {
+            runOnUiThread { startActivity(Intent(this, NativeAccountCreateActivity::class.java)) }
+            true
+        }
+    }
+
+    /** QA: the SDK's NativeRecoveryHost.launcher opens the native recovery page through this. */
+    private val nativeRecoveryOpener: () -> Boolean = { openNativeRecoveryPage() }
+
+    /** QA: shows the native recovery page. Called from the JS bridge thread. */
+    private fun openNativeRecoveryPage(): Boolean {
+        if (isFinishing || isDestroyed) return false
+        runOnUiThread { startActivity(Intent(this, NativeRecoveryActivity::class.java)) }
+        return true
+    }
+
+    private fun isWalletPackageInstalled(packageName: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(packageName, 0)
+            }
+            true
+        } catch (_: PackageManager.NameNotFoundException) {
+            false
+        }
+    }
+
+    private fun legacyInstalledWalletIds(): JSONArray {
+        val ids = JSONArray()
+        if (isWalletPackageInstalled("io.metamask")) ids.put("metamask")
+        if (
+            isWalletPackageInstalled("org.toshi") ||
+            isWalletPackageInstalled("com.coinbase.wallet")
+        ) {
+            ids.put("base")
+        }
+        return ids
+    }
+
+    private fun saveFileFromBridge(raw: String) {
+        try {
+            val body = JSONObject(raw)
+            val dataUrl = body.optString("dataUrl", "")
+            val comma = dataUrl.indexOf(',')
+            val encoded = if (comma >= 0) dataUrl.substring(comma + 1) else dataUrl
+            val bytes = Base64.decode(encoded, Base64.DEFAULT)
+            if (bytes.isEmpty()) return
+            pendingFileBytes = bytes
+            pendingFileRequestId = body.optString("requestId", "")
+            val filename = body.optString("filename", "download")
+                .substringAfterLast('/')
+                .substringAfterLast('\\')
+                .ifBlank { "download" }
+            createFileDocumentLauncher.launch(filename)
+        } catch (_: Exception) {
+            dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "saveFile").put("ok", false).put("error", "invalid_file_data"))
+        }
+    }
+
+    private fun openExternalUrlFromBridge(raw: String) {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return
+        try {
+            val uri = Uri.parse(trimmed)
+            val scheme = uri.scheme?.lowercase() ?: return
+            if (scheme !in ALLOWED_EXTERNAL_URL_SCHEMES) return
+            // NFC card links are deprecated (PM R1664/R1703): a SUN URL from the bridge never opens externally.
+            if ((scheme == "http" || scheme == "https") && isBlockedSunUri(uri)) return
+            // go.cb-w.com: open Coinbase Wallet APP with the full URI when possible
+            // (Receive-from-wallet dapp?cb_url=…). Bare trampoline → launch app / Play Store.
+            // Never load go.cb-w.com in WebView (store "Open with" chooser loop).
+            if ((scheme == "http" || scheme == "https") && isCoinbaseWalletTrampolineHost(uri.host)) {
+                openCoinbaseWalletTrampolineExternally(uri)
+                return
+            }
+            if (scheme == "market") {
+                val id = uri.getQueryParameter("id")?.trim().orEmpty()
+                if (id.isNotEmpty()) {
+                    openPlayStoreForPackage(id)
+                    return
+                }
+            }
+            startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Receive-from-wallet Coinbase: prefer package-targeted ACTION_VIEW so
+     * `go.cb-w.com/dapp?cb_url=…` opens inside Coinbase Wallet with the handoff URL.
+     * Bare `go.cb-w.com/` (no dapp path) falls back to launching the wallet home / Play Store.
+     */
+    private fun openCoinbaseWalletTrampolineExternally(uri: Uri) {
+        val path = (uri.path ?: "").lowercase()
+        val hasDapp =
+            path.contains("dapp") ||
+                !uri.getQueryParameter("cb_url").isNullOrBlank() ||
+                !uri.getQueryParameter("url").isNullOrBlank()
+        if (hasDapp) {
+            val packages = listOf("org.toshi", "com.coinbase.wallet", "com.coinbase.android")
+            for (pkg in packages) {
+                if (!isWalletPackageInstalled(pkg)) continue
+                val view = Intent(Intent.ACTION_VIEW, uri).apply {
+                    setPackage(pkg)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    if (view.resolveActivity(packageManager) != null) {
+                        startActivity(view)
+                        return
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            // Installed wallet could not resolve the trampoline URI — still try generic VIEW
+            // with Coinbase package pinned via chooser-free path when only one package matches.
+            try {
+                val generic = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val resolve = packageManager.queryIntentActivities(generic, 0)
+                val coinbase = resolve.firstOrNull { info ->
+                    val p = info.activityInfo?.packageName.orEmpty()
+                    p == "org.toshi" || p == "com.coinbase.wallet" || p == "com.coinbase.android"
+                }
+                if (coinbase != null) {
+                    generic.setPackage(coinbase.activityInfo.packageName)
+                    startActivity(generic)
+                    return
+                }
+            } catch (_: Exception) {
+            }
+        }
+        launchCoinbaseWalletAppOrStore()
+    }
+
+    private data class InAppBrowserOpenArgs(val url: String, val requestId: String)
+
+    /** Plain URL or JSON `{"url":"…","requestId":"…"}` from PWA. */
+    private fun parseInAppBrowserOpenArgs(raw: String): InAppBrowserOpenArgs? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.startsWith("{")) {
+            return try {
+                val o = JSONObject(trimmed)
+                val url = o.optString("url", "").trim()
+                if (url.isEmpty()) null
+                else InAppBrowserOpenArgs(url, o.optString("requestId", "").trim())
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return InAppBrowserOpenArgs(trimmed, "")
+    }
+
+    private fun sanitizedInAppBrowserUri(raw: String): Uri? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        return try {
+            val uri = Uri.parse(trimmed)
+            val scheme = uri.scheme?.lowercase() ?: return null
+            if (scheme != "http" && scheme != "https") return null
+            uri
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun notifyPwaInAppBrowserClosed(requestId: String, url: String) {
+        dispatchAndroidBridgeJsonToWeb(
+            JSONObject()
+                .put("action", "inAppBrowserClosed")
+                .put("ok", true)
+                .put("requestId", requestId)
+                .put("url", url)
+                .put("reason", "dismissed"),
+        )
+    }
+
+    private fun domainTitleForUri(uri: Uri): String {
+        val host = (uri.host ?: "").trim()
+        if (host.isEmpty()) return uri.toString()
+        return if (host.startsWith("www.", ignoreCase = true)) host.substring(4) else host
+    }
+
+    private fun dp(value: Float): Int =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, resources.displayMetrics).toInt()
+
+    /** Coinbase Wallet free-send trampoline — must not load in WebView (redirects to market://). */
+    private fun isCoinbaseWalletTrampolineHost(host: String?): Boolean {
+        val h = host?.lowercase()?.trim().orEmpty()
+        if (h.isEmpty()) return false
+        return h == "go.cb-w.com" || h.endsWith(".cb-w.com")
+    }
+
+    /**
+     * Coinbase Onramp / login HTTPS hosts must stay in the in-app WebView.
+     * Coinbase often redirects via `intent://…#Intent;scheme=https;package=com.android.chrome;…`
+     * — starting that Intent opens Chrome with the full checkout URL (device evidence).
+     */
+    private fun isCoinbaseOnrampKeepInWebViewHost(host: String?): Boolean {
+        val h = host?.lowercase()?.trim().orEmpty()
+        if (h.isEmpty()) return false
+        return h == "pay.coinbase.com" ||
+            h == "login.coinbase.com" ||
+            h == "www.coinbase.com" ||
+            h == "coinbase.com" ||
+            h.endsWith(".coinbase.com")
+    }
+
+    private fun isSystemBrowserPackage(packageName: String?): Boolean {
+        val p = packageName?.lowercase()?.trim().orEmpty()
+        if (p.isEmpty()) return false
+        return p == "com.android.chrome" ||
+            p == "com.chrome.beta" ||
+            p == "com.chrome.dev" ||
+            p == "com.chrome.canary" ||
+            p == "com.google.android.apps.chrome" ||
+            p == "com.sec.android.app.sbrowser" ||
+            p == "org.mozilla.firefox" ||
+            p == "com.microsoft.emmx" ||
+            p == "com.opera.browser" ||
+            p == "com.brave.browser" ||
+            p.contains("browser")
+    }
+
+    private fun preferLoadHttpsInInAppWebView(uri: Uri?, targetPackage: String?): Boolean {
+        if (uri == null) return false
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        if (scheme != "http" && scheme != "https") return false
+        if (isCoinbaseOnrampKeepInWebViewHost(uri.host)) return true
+        if (isSystemBrowserPackage(targetPackage)) return true
+        return false
+    }
+
+    /**
+     * While the in-app overlay is open, Chromium / OEM WebView may still fire
+     * ACTION_VIEW → Chrome for OAuth (`login.coinbase.com`) when `onCreateWindow`
+     * mishandles transport. Intercept and reload into the overlay WebView.
+     */
+    private fun tryKeepInAppBrowserExternalIntent(intent: Intent?): Boolean {
+        if (intent == null || inAppBrowserOverlay == null) return false
+        val action = intent.action
+        if (action != null &&
+            action != Intent.ACTION_VIEW &&
+            action != Intent.ACTION_MAIN
+        ) {
+            return false
+        }
+        val data = intent.data ?: return false
+        val scheme = data.scheme?.lowercase().orEmpty()
+        val pkg = intent.`package`
+        if (scheme == "http" || scheme == "https") {
+            val host = data.host?.lowercase().orEmpty()
+            // Never swallow Play Store / market HTTPS while overlay is open.
+            if (host.contains("play.google.com") || host == "market.android.com") {
+                return false
+            }
+            // Chromium OAuth escape: Chrome package, blank package, or Coinbase hosts.
+            if (
+                isCoinbaseOnrampKeepInWebViewHost(data.host) ||
+                isSystemBrowserPackage(pkg) ||
+                pkg.isNullOrBlank()
+            ) {
+                val url = data.toString()
+                Log.i(TAG, "inAppBrowser: intercept startActivity host=${data.host} pkg=$pkg")
+                runOnUiThread {
+                    inAppBrowserWebView?.loadUrl(url)
+                }
+                return true
+            }
+        }
+        if (scheme == "intent") {
+            try {
+                val parsed = Intent.parseUri(data.toString(), Intent.URI_INTENT_SCHEME)
+                val https = parsed.data
+                if (https != null && preferLoadHttpsInInAppWebView(https, parsed.`package`)) {
+                    Log.i(TAG, "inAppBrowser: intercept intent startActivity host=${https.host}")
+                    runOnUiThread {
+                        inAppBrowserWebView?.loadUrl(https.toString())
+                    }
+                    return true
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return false
+    }
+
+    override fun startActivity(intent: Intent) {
+        if (isSunExternalIntent(intent)) return
+        if (tryKeepInAppBrowserExternalIntent(intent)) return
+        super.startActivity(intent)
+    }
+
+    override fun startActivity(intent: Intent, options: Bundle?) {
+        if (isSunExternalIntent(intent)) return
+        if (tryKeepInAppBrowserExternalIntent(intent)) return
+        super.startActivity(intent, options)
+    }
+
+    /**
+     * Last gate for every activity launch from this activity (bridge openURL, external top-level links, wallet and
+     * intent: URIs): an NFC SUN URL (PM R1664/R1703) in the intent data, its selector, or a browser_fallback_url is
+     * never handed to another app or the system browser.
+     */
+    private fun isSunExternalIntent(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val candidates = mutableListOf<Uri>()
+        intent.data?.let { candidates += it }
+        intent.selector?.data?.let { candidates += it }
+        intent.getStringExtra("browser_fallback_url")?.let { s -> runCatching { Uri.parse(s.trim()) }.getOrNull()?.let { candidates += it } }
+        val blocked = candidates.any { u ->
+            val scheme = u.scheme?.lowercase()
+            (scheme == "http" || scheme == "https") && isBlockedSunUri(u)
+        }
+        if (blocked && BuildConfig.DEBUG) Log.i("BeamioNfcSun", "refused external launch of a SUN link")
+        return blocked
+    }
+
+    private fun openPlayStoreForPackage(packageName: String) {
+        val pkg = packageName.trim()
+        if (pkg.isEmpty()) return
+        val marketUri = Uri.parse("market://details?id=$pkg")
+        val market = Intent(Intent.ACTION_VIEW, marketUri).apply {
+            setPackage("com.android.vending")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            if (market.resolveActivity(packageManager) != null) {
+                startActivity(market)
+                return
+            }
+        } catch (_: Exception) {
+        }
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://play.google.com/store/apps/details?id=$pkg"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun launchCoinbaseWalletAppOrStore(): Boolean {
+        val packages = listOf("org.toshi", "com.coinbase.wallet", "com.coinbase.android")
+        for (pkg in packages) {
+            if (!isWalletPackageInstalled(pkg)) continue
+            val launch = packageManager.getLaunchIntentForPackage(pkg)
+            if (launch != null) {
+                try {
+                    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(launch)
+                    return true
+                } catch (_: Exception) {
+                }
+            }
+        }
+        openPlayStoreForPackage("org.toshi")
+        return true
+    }
+
+    /**
+     * Handle non-http(s) navigations from the in-app browser once (debounced).
+     * Bare ACTION_VIEW on market:// opens Galaxy Store / F-Droid / Play chooser in a loop.
+     */
+    private fun handleInAppBrowserNonHttpUri(view: WebView?, uri: Uri): Boolean {
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        if (scheme == "http" || scheme == "https" || scheme == "about" || scheme == "blob" || scheme.isEmpty()) {
+            return false
+        }
+        try {
+            view?.stopLoading()
+        } catch (_: Exception) {
+        }
+        val key = uri.toString()
+        val now = SystemClock.elapsedRealtime()
+        if (key == inAppLastExternalLaunchKey && now - inAppLastExternalLaunchAtMs < 2_500L) {
+            return true
+        }
+        inAppLastExternalLaunchKey = key
+        inAppLastExternalLaunchAtMs = now
+        try {
+            when (scheme) {
+                "intent" -> {
+                    val rawIntent = uri.toString()
+                    val parsed = Intent.parseUri(rawIntent, Intent.URI_INTENT_SCHEME)
+                    val pkg = parsed.`package`?.trim().orEmpty()
+                    val dataUri = parsed.data
+                    var fallback = parsed.getStringExtra("browser_fallback_url")?.trim().orEmpty()
+                    if (fallback.isEmpty()) {
+                        // Some OEMs omit the extra; parse S.browser_fallback_url from the raw URI.
+                        val m = Regex("""S\.browser_fallback_url=([^;]+)""").find(rawIntent)
+                        if (m != null) {
+                            fallback = Uri.decode(m.groupValues[1]).trim()
+                        }
+                    }
+                    Log.i(
+                        TAG,
+                        "inAppBrowser: intent pkg=$pkg dataHost=${dataUri?.host} " +
+                            "fallbackHost=${runCatching { Uri.parse(fallback).host }.getOrNull()}",
+                    )
+                    // Never hand Coinbase / browser-package HTTPS to Chrome — keep checkout in shell.
+                    if (preferLoadHttpsInInAppWebView(dataUri, pkg)) {
+                        Log.i(TAG, "inAppBrowser: keep intent https in WebView host=${dataUri?.host} pkg=$pkg")
+                        view?.loadUrl(dataUri!!.toString())
+                        return true
+                    }
+                    if (fallback.startsWith("http://") || fallback.startsWith("https://")) {
+                        val fbUri = Uri.parse(fallback)
+                        if (
+                            preferLoadHttpsInInAppWebView(fbUri, pkg) ||
+                            isCoinbaseOnrampKeepInWebViewHost(fbUri.host) ||
+                            pkg.isEmpty() ||
+                            isSystemBrowserPackage(pkg)
+                        ) {
+                            Log.i(TAG, "inAppBrowser: keep intent fallback in WebView host=${fbUri.host}")
+                            view?.loadUrl(fallback)
+                            return true
+                        }
+                    }
+                    // intent://login.coinbase.com/…#Intent;scheme=https;package=com.android.chrome;end
+                    // with empty data/fallback — rebuild https from authority + scheme extra.
+                    val intentScheme = parsed.scheme?.lowercase().orEmpty().ifBlank {
+                        Regex(""";scheme=([a-zA-Z0-9+.-]+)""").find(rawIntent)?.groupValues?.getOrNull(1)
+                            ?.lowercase().orEmpty()
+                    }
+                    if (
+                        (intentScheme == "http" || intentScheme == "https") &&
+                        (isSystemBrowserPackage(pkg) || pkg.isEmpty() || isCoinbaseOnrampKeepInWebViewHost(uri.host))
+                    ) {
+                        val hostPart = uri.host?.trim().orEmpty()
+                        if (hostPart.isNotEmpty()) {
+                            val rebuilt = Uri.Builder()
+                                .scheme(intentScheme)
+                                .encodedAuthority(uri.encodedAuthority)
+                                .encodedPath(uri.encodedPath)
+                                .encodedQuery(uri.encodedQuery)
+                                .encodedFragment(null)
+                                .build()
+                                .toString()
+                                .substringBefore("#Intent")
+                            if (rebuilt.startsWith("http://") || rebuilt.startsWith("https://")) {
+                                Log.i(TAG, "inAppBrowser: rebuild intent→https host=$hostPart")
+                                view?.loadUrl(rebuilt)
+                                return true
+                            }
+                        }
+                    }
+                    // Wallet / non-browser apps only (never Chrome for https checkout).
+                    if (pkg.isNotEmpty() && !isSystemBrowserPackage(pkg) &&
+                        parsed.resolveActivity(packageManager) != null
+                    ) {
+                        startActivity(parsed)
+                        return true
+                    }
+                    if (pkg.isNotEmpty() && !isSystemBrowserPackage(pkg)) {
+                        openPlayStoreForPackage(pkg)
+                        return true
+                    }
+                    val market = parsed.getStringExtra("market_referrer")
+                    if (!market.isNullOrBlank()) {
+                        openPlayStoreForPackage(pkg.ifBlank { "org.toshi" })
+                    }
+                }
+                "market" -> {
+                    val id = uri.getQueryParameter("id")?.trim().orEmpty()
+                    if (id.isNotEmpty()) {
+                        openPlayStoreForPackage(id)
+                    } else {
+                        val playOnly = Intent(Intent.ACTION_VIEW, uri).apply {
+                            setPackage("com.android.vending")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        if (playOnly.resolveActivity(packageManager) != null) {
+                            startActivity(playOnly)
+                        }
+                    }
+                }
+                "cbwallet", "coinbase", "base" -> {
+                    val packages = listOf("org.toshi", "com.coinbase.wallet", "com.coinbase.android")
+                    var launched = false
+                    for (pkg in packages) {
+                        if (!isWalletPackageInstalled(pkg)) continue
+                        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                            setPackage(pkg)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        if (intent.resolveActivity(packageManager) != null) {
+                            startActivity(intent)
+                            launched = true
+                            break
+                        }
+                    }
+                    if (!launched) openPlayStoreForPackage("org.toshi")
+                }
+                else -> {
+                    if (scheme in ALLOWED_EXTERNAL_URL_SCHEMES) {
+                        val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (intent.resolveActivity(packageManager) != null) {
+                            startActivity(intent)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return true
+    }
+
+    /**
+     * Force window.open / target=_blank into the same in-app WebView so Coinbase OAuth
+     * (login.coinbase.com) never reaches Chromium's system-browser fallback.
+     */
+    private fun injectInAppBrowserSameWindowNavigation(view: WebView?) {
+        if (view == null) return
+        view.evaluateJavascript(
+            """
+            (function(){
+              if (window.__beamioInAppSameWindow) return;
+              window.__beamioInAppSameWindow = 1;
+              var _open = window.open;
+              window.open = function(url, name, features) {
+                try {
+                  if (typeof url === 'string' && url) {
+                    var u = new URL(url, location.href);
+                    if (u.protocol === 'http:' || u.protocol === 'https:') {
+                      location.assign(u.href);
+                      return null;
+                    }
+                  }
+                } catch (e) {}
+                if (typeof url === 'string' && url) {
+                  // Never hand non-http window.open to Chromium (intent:// → Chrome).
+                  try { location.href = url; } catch (e2) {}
+                  return null;
+                }
+                // Empty / relative open — stay in-shell; do not call native _open.
+                return null;
+              };
+              document.addEventListener('click', function(e) {
+                var t = e.target;
+                if (!t || !t.closest) return;
+                var a = t.closest('a[target="_blank"]');
+                if (!a || !a.href) return;
+                if (/^https?:/i.test(a.href)) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  location.assign(a.href);
+                }
+              }, true);
+            })();
+            """.trimIndent(),
+            null,
+        )
+    }
+
+    /**
+     * PWA `CashTreesAndroid.openInAppBrowser(url|json)` — full-screen overlay, slides up from bottom.
+     * Floating Back + domain title capsule share Beamio scroll show/hide (safe-area aware).
+     * Dismiss notifies PWA via `inAppBrowserClosed` (optional `requestId` echoed).
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun openInAppBrowserFromBridge(raw: String) {
+        val args = parseInAppBrowserOpenArgs(raw) ?: return
+        // The ack carries the body's reqId when it is valid (§25.52AW.1, same as iOS); requestId is not used for it.
+        if (refuseKeyShapedUrl(args.url, BridgeReqId.fromJsonText(raw))) return
+        val uri = sanitizedInAppBrowserUri(args.url) ?: return
+        Log.i(TAG, "openInAppBrowserFromBridge host=${uri.host} requestId=${args.requestId}")
+        if (!::rootLayout.isInitialized) return
+        // go.cb-w.com is an app trampoline — WebView → market:// → store chooser shake loop.
+        if (isCoinbaseWalletTrampolineHost(uri.host)) {
+            launchCoinbaseWalletAppOrStore()
+            return
+        }
+        if (inAppBrowserOverlay != null) {
+            if (args.requestId.isNotEmpty()) {
+                inAppBrowserRequestId = args.requestId
+            }
+            inAppBrowserOpenedUrl = uri.toString()
+            inAppBrowserWebView?.loadUrl(uri.toString())
+            return
+        }
+        inAppBrowserClosing = false
+        inAppBrowserRequestId = args.requestId
+        inAppBrowserOpenedUrl = uri.toString()
+        inAppLastExternalLaunchKey = null
+        inAppLastExternalLaunchAtMs = 0L
+        resetInAppChromeScrollState()
+
+        val density = resources.displayMetrics.density
+        val backSize = dp(36f)
+        val chromeRowH = dp(44f)
+        val chromeBelowGap = dp(8f)
+        val titleColor = Color.parseColor("#0F172A")
+        // White shell surface — page may paint edge-to-edge under notch when chrome is hidden.
+        val webSurface = Color.WHITE
+
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(webSurface)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            elevation = 24f * density
+            fitsSystemWindows = false
+        }
+
+        val titleView = TextView(this)
+        val browser = WebView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            setBackgroundColor(webSurface)
+            // Top inset clears Back + title; removed when chrome opacity → 0 (fullscreen / notch).
+            clipToPadding = true
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            // Keep true so Chromium delivers window.open to onCreateWindow (we never hand off to Chrome).
+            settings.javaScriptCanOpenWindowsAutomatically = true
+            settings.setSupportMultipleWindows(true)
+            settings.setSupportZoom(false)
+            settings.builtInZoomControls = false
+            settings.displayZoomControls = false
+            settings.mediaPlaybackRequiresUserGesture = false
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? =
+                    sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, "browser")
+
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                ): Boolean {
+                    val next = request?.url ?: return false
+                    Log.i(
+                        TAG,
+                        "inAppBrowser: override scheme=${next.scheme} host=${next.host} " +
+                            "main=${request.isForMainFrame}",
+                    )
+                    if (request.isForMainFrame && isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
+                    if (isCoinbaseWalletTrampolineHost(next.host)) {
+                        try {
+                            view?.stopLoading()
+                        } catch (_: Exception) {
+                        }
+                        val now = SystemClock.elapsedRealtime()
+                        val key = "cb-w-trampoline"
+                        if (key == inAppLastExternalLaunchKey && now - inAppLastExternalLaunchAtMs < 2_500L) {
+                            return true
+                        }
+                        inAppLastExternalLaunchKey = key
+                        inAppLastExternalLaunchAtMs = now
+                        launchCoinbaseWalletAppOrStore()
+                        return true
+                    }
+                    // http(s) stay in this WebView (return false = WebView loads). Do not
+                    // loadUrl+return-true here — that re-enters shouldOverride and can loop.
+                    // Chrome escape for login.coinbase.com is onCreateWindow → false, not this.
+                    val scheme = next.scheme?.lowercase().orEmpty()
+                    if (scheme == "http" || scheme == "https" || scheme == "about" || scheme == "blob") {
+                        return false
+                    }
+                    return handleInAppBrowserNonHttpUri(view, next)
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                    if (url.isNullOrBlank()) return false
+                    val next = try {
+                        Uri.parse(url)
+                    } catch (_: Exception) {
+                        return false
+                    }
+                    Log.i(TAG, "inAppBrowser: override(legacy) scheme=${next.scheme} host=${next.host}")
+                    if (isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
+                    if (isCoinbaseWalletTrampolineHost(next.host)) {
+                        launchCoinbaseWalletAppOrStore()
+                        return true
+                    }
+                    val scheme = next.scheme?.lowercase().orEmpty()
+                    if (scheme == "http" || scheme == "https" || scheme == "about" || scheme == "blob") {
+                        return false
+                    }
+                    return handleInAppBrowserNonHttpUri(view, next)
+                }
+
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    injectInAppBrowserSameWindowNavigation(view)
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    if (url.isNullOrBlank()) return
+                    try {
+                        titleView.text = domainTitleForUri(Uri.parse(url))
+                    } catch (_: Exception) {
+                    }
+                    injectInAppBrowserSameWindowNavigation(view)
+                    // Lock pinch zoom; keep viewport-fit so safe-area CSS still works.
+                    view?.evaluateJavascript(
+                        """
+                        (function(){
+                          var m=document.querySelector('meta[name="viewport"]');
+                          var fit='viewport-fit=cover';
+                          var locked='width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, '+fit;
+                          if(!m){m=document.createElement('meta');m.name='viewport';(document.head||document.documentElement).appendChild(m);m.setAttribute('content',locked);}
+                          else{var c=m.getAttribute('content')||'';if(c.indexOf('user-scalable')===-1||c.indexOf('maximum-scale')===-1){m.setAttribute('content',locked);}else if(c.indexOf('viewport-fit')===-1){m.setAttribute('content',c?(c+', '+fit):fit);}}
+                        })();
+                        """.trimIndent(),
+                        null,
+                    )
+                }
+            }
+            // Coinbase OAuth uses window.open / target=_blank. Returning false from
+            // onCreateWindow → Chromium ACTION_VIEW → Chrome (login.coinbase.com).
+            // Returning true WITHOUT assigning WebViewTransport + sendToTarget() also
+            // lets Chromium fall back to Chrome on many OEM WebViews — always sink
+            // the popup into a throwaway WebView that redirects into [host].
+            webChromeClient = object : WebChromeClient() {
+                override fun onCreateWindow(
+                    view: WebView?,
+                    isDialog: Boolean,
+                    isUserGesture: Boolean,
+                    resultMsg: Message?,
+                ): Boolean {
+                    val host = view ?: return false
+                    val hitUrl = host.hitTestResult?.extra?.trim().orEmpty()
+                    Log.i(
+                        TAG,
+                        "inAppBrowser: onCreateWindow dialog=$isDialog gesture=$isUserGesture " +
+                            "hit=${hitUrl.take(120)} transport=${resultMsg?.obj != null}",
+                    )
+                    if (hitUrl.startsWith("http://") || hitUrl.startsWith("https://")) {
+                        if (!isCoinbaseWalletTrampolineHost(Uri.parse(hitUrl).host)) {
+                            host.loadUrl(hitUrl)
+                        } else {
+                            launchCoinbaseWalletAppOrStore()
+                        }
+                    }
+                    val transport = resultMsg?.obj as? WebView.WebViewTransport
+                    if (transport == null) {
+                        // No transport to fill — never return false (that opens Chrome).
+                        return true
+                    }
+                    val sink = WebView(host.context).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.javaScriptCanOpenWindowsAutomatically = false
+                        settings.setSupportMultipleWindows(false)
+                        webViewClient = object : WebViewClient() {
+                            private fun routeToHost(next: Uri?): Boolean {
+                                if (next == null) return true
+                                Log.i(TAG, "inAppBrowser: popup→host scheme=${next.scheme} host=${next.host}")
+                                if (isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
+                                if (isCoinbaseWalletTrampolineHost(next.host)) {
+                                    launchCoinbaseWalletAppOrStore()
+                                    return true
+                                }
+                                if (handleInAppBrowserNonHttpUri(host, next)) {
+                                    return true
+                                }
+                                val scheme = next.scheme?.lowercase().orEmpty()
+                                if (scheme == "http" || scheme == "https" || scheme == "about" || scheme == "blob") {
+                                    host.post { host.loadUrl(next.toString()) }
+                                }
+                                return true
+                            }
+
+                            override fun shouldOverrideUrlLoading(
+                                v: WebView?,
+                                request: WebResourceRequest?,
+                            ): Boolean = routeToHost(request?.url)
+
+                            @Deprecated("Deprecated in Java")
+                            override fun shouldOverrideUrlLoading(v: WebView?, url: String?): Boolean {
+                                if (url.isNullOrBlank()) return true
+                                return routeToHost(
+                                    try {
+                                        Uri.parse(url)
+                                    } catch (_: Exception) {
+                                        null
+                                    },
+                                )
+                            }
+
+                            override fun onPageStarted(v: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                if (url.isNullOrBlank() || url == "about:blank") return
+                                try {
+                                    val next = Uri.parse(url)
+                                    val scheme = next.scheme?.lowercase().orEmpty()
+                                    if (scheme == "http" || scheme == "https") {
+                                        Log.i(TAG, "inAppBrowser: popup onPageStarted→host ${next.host}")
+                                        host.post { host.loadUrl(url) }
+                                        try {
+                                            v?.stopLoading()
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                    transport.webView = sink
+                    resultMsg.sendToTarget()
+                    return true
+                }
+            }
+            setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                scheduleInAppChromeOpacity(scrollY.toFloat())
+            }
+        }
+
+        // Floating chrome: circular Back (shadow) + plain domain title (full-row center).
+        val chrome = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                chromeRowH,
+            ).apply {
+                gravity = Gravity.TOP
+            }
+            // Touches pass through when opacity < 0.05 (see applyInAppChromeOpacity).
+            isClickable = true
+            clipChildren = false
+            clipToPadding = false
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(chrome) { v, insets ->
+            // max(1rem, safe-area-inset-top) — chrome floats below notch / status bar.
+            val top = maxOf(dp(16f), insets.getInsets(WindowInsetsCompat.Type.statusBars()).top)
+            val lp = v.layoutParams as FrameLayout.LayoutParams
+            lp.topMargin = top
+            v.layoutParams = lp
+            // Content clears chrome + small gap; collapses to 0 when chrome is hidden.
+            // WebView ignores View padding for HTML layout — use layout topMargin instead.
+            inAppChromeContentInsetPx = top + chromeRowH + chromeBelowGap
+            syncInAppBrowserTopInset(inAppChromeOpacity)
+            insets
+        }
+        ViewCompat.requestApplyInsets(chrome)
+        // Fallback inset before first insets pass (non-notch ≈ 16 + 44 + 8).
+        inAppChromeContentInsetPx = dp(16f) + chromeRowH + chromeBelowGap
+        syncInAppBrowserTopInset(1f)
+
+        val backDisc = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.argb(235, 255, 255, 255))
+            setStroke(dp(1f), Color.argb(20, 0, 0, 0))
+        }
+        // Oval disc + centered chevron; elevation shadow matches iOS circular Back.
+        val backButton = FrameLayout(this).apply {
+            contentDescription = "Back"
+            background = backDisc
+            elevation = 8f * density
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setOval(0, 0, view.width, view.height)
+                }
+            }
+            clipToOutline = false
+            isClickable = true
+            isFocusable = true
+            layoutParams = FrameLayout.LayoutParams(backSize, backSize).apply {
+                gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                marginStart = dp(16f)
+            }
+            setOnClickListener { dismissInAppBrowser(animated = true) }
+            addView(
+                ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_chevron_left)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    isClickable = false
+                    isFocusable = false
+                    layoutParams = FrameLayout.LayoutParams(dp(17f), dp(17f), Gravity.CENTER)
+                },
+            )
+        }
+
+        // Domain as plain centered text (no capsule / pill chrome).
+        titleView.apply {
+            text = domainTitleForUri(uri)
+            setTextColor(titleColor)
+            textSize = 15f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            background = null
+            elevation = 0f
+            // Symmetric padding keeps title optically centered on the full row
+            // while clearing the leading Back disc.
+            setPadding(dp(56f), 0, dp(56f), 0)
+            isClickable = false
+            isFocusable = false
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                chromeRowH,
+            ).apply {
+                gravity = Gravity.CENTER
+            }
+        }
+
+        // Title under Back so the circular button stays on top for hits + shadow.
+        chrome.addView(titleView)
+        chrome.addView(backButton)
+
+        overlay.addView(browser)
+        overlay.addView(chrome)
+        rootLayout.addView(overlay)
+        inAppBrowserOverlay = overlay
+        inAppBrowserWebView = browser
+        inAppBrowserChrome = chrome
+        applyInAppChromeOpacity(1f, animated = false)
+
+        overlay.post {
+            val h = overlay.height.toFloat().coerceAtLeast(rootLayout.height.toFloat())
+            overlay.translationY = h
+            overlay.animate()
+                .translationY(0f)
+                .setDuration(300L)
+                .start()
+        }
+        browser.loadUrl(uri.toString())
+    }
+
+    private fun resetInAppChromeScrollState() {
+        inAppChromeHandler.removeCallbacks(inAppHideUnlockRunnable)
+        inAppChromeHandler.removeCallbacks(inAppRevealRunnable)
+        inAppChromeOpacity = 1f
+        inAppLastScrollTop = 0f
+        inAppLatestScrollTop = 0f
+        inAppRevealPendingDistance = 0f
+        inAppRevealArmed = false
+        inAppRevealReady = false
+        inAppHideUnlock = false
+    }
+
+    private fun computeInAppChromeOpacity(scrollTop: Float): Float {
+        if (scrollTop <= 40f) return 1f
+        return maxOf(0f, 1f - (scrollTop - 40f) / 100f)
+    }
+
+    /**
+     * Push WebView below floating Back + title so HTML content is not covered.
+     * Chromium WebView does not apply View padding to the document — topMargin is required.
+     * 0 when chrome hidden → edge-to-edge incl. notch (matches iOS contentInset collapse).
+     */
+    private fun syncInAppBrowserTopInset(opacity: Float) {
+        val browser = inAppBrowserWebView ?: return
+        val lp = browser.layoutParams as? FrameLayout.LayoutParams ?: return
+        // Fully visible → exact inset; mid-fade interpolate; hidden → 0 (fullscreen).
+        val next = when {
+            opacity >= 0.99f -> inAppChromeContentInsetPx
+            opacity < 0.05f -> 0
+            else -> (inAppChromeContentInsetPx * opacity).toInt()
+        }
+        if (lp.topMargin != next) {
+            lp.topMargin = next
+            browser.layoutParams = lp
+        }
+        if (browser.paddingTop != 0) {
+            browser.setPadding(0, 0, 0, 0)
+        }
+    }
+
+    private fun setInAppChromeHitTesting(enabled: Boolean) {
+        val chrome = inAppBrowserChrome ?: return
+        chrome.isClickable = enabled
+        chrome.isEnabled = enabled
+        chrome.isFocusable = enabled
+        if (chrome is ViewGroup) {
+            for (i in 0 until chrome.childCount) {
+                val child = chrome.getChildAt(i)
+                child.isClickable = enabled
+                child.isEnabled = enabled
+                child.isFocusable = enabled
+            }
+        }
+        // INVISIBLE lets touches reach the WebView under the chrome layer.
+        chrome.visibility = if (enabled) View.VISIBLE else View.INVISIBLE
+    }
+
+    private fun applyInAppChromeOpacity(next: Float, animated: Boolean) {
+        val chrome = inAppBrowserChrome ?: return
+        val clamped = next.coerceIn(0f, 1f)
+        if (kotlin.math.abs(clamped - inAppChromeOpacity) < 0.02f && clamped > 0f && clamped < 1f) {
+            return
+        }
+        inAppChromeOpacity = clamped
+        val hitEnabled = clamped >= 0.05f
+        val ty = -(1f - clamped) * chrome.height.coerceAtLeast(dp(44f))
+        val applyVisual = {
+            chrome.alpha = clamped
+            chrome.translationY = ty
+            syncInAppBrowserTopInset(clamped)
+        }
+        if (hitEnabled) {
+            // Show before animating in so the fade is visible.
+            chrome.visibility = View.VISIBLE
+            setInAppChromeHitTesting(true)
+        }
+        if (animated) {
+            chrome.animate()
+                .alpha(clamped)
+                .translationY(ty)
+                .setDuration(300L)
+                .withStartAction {
+                    syncInAppBrowserTopInset(clamped)
+                }
+                .withEndAction {
+                    syncInAppBrowserTopInset(clamped)
+                    if (!hitEnabled) {
+                        setInAppChromeHitTesting(false)
+                    } else {
+                        chrome.isClickable = true
+                        chrome.isEnabled = true
+                    }
+                }
+                .start()
+        } else {
+            chrome.animate().cancel()
+            applyVisual()
+            setInAppChromeHitTesting(hitEnabled)
+        }
+    }
+
+    private fun scheduleInAppChromeOpacity(scrollTop: Float) {
+        val browser = inAppBrowserWebView
+        if (browser != null) {
+            val contentH = browser.contentHeight * browser.scale
+            val boundsH = browser.height.toFloat()
+            if (contentH <= boundsH + 1f) {
+                inAppLastScrollTop = scrollTop
+                inAppLatestScrollTop = scrollTop
+                applyInAppChromeOpacity(1f, animated = true)
+                return
+            }
+        }
+
+        val previous = inAppLastScrollTop
+        val delta = scrollTop - previous
+        inAppLastScrollTop = scrollTop
+        inAppLatestScrollTop = scrollTop
+
+        if (delta > 0f) {
+            inAppRevealArmed = false
+            inAppRevealReady = false
+            inAppRevealPendingDistance = 0f
+            inAppChromeHandler.removeCallbacks(inAppRevealRunnable)
+            if (inAppHideUnlock) return
+            inAppHideUnlock = true
+            inAppChromeHandler.postDelayed(inAppHideUnlockRunnable, 300L)
+            applyInAppChromeOpacity(computeInAppChromeOpacity(scrollTop), animated = true)
+            return
+        }
+
+        if (delta < 0f && inAppChromeOpacity < 1f) {
+            inAppRevealPendingDistance += kotlin.math.abs(delta)
+            if (inAppRevealReady) {
+                val pending = inAppRevealPendingDistance
+                inAppRevealPendingDistance = 0f
+                applyInAppChromeOpacity(
+                    minOf(1f, inAppChromeOpacity + pending / 100f),
+                    animated = true,
+                )
+                return
+            }
+            if (!inAppRevealArmed) {
+                inAppRevealArmed = true
+                inAppChromeHandler.postDelayed(inAppRevealRunnable, 500L)
+            }
+            return
+        }
+
+        if (delta == 0f && scrollTop <= 40f) {
+            applyInAppChromeOpacity(1f, animated = true)
+        }
+    }
+
+    private fun dismissInAppBrowser(animated: Boolean) {
+        val overlay = inAppBrowserOverlay ?: return
+        if (inAppBrowserClosing) return
+        inAppBrowserClosing = true
+        resetInAppChromeScrollState()
+        val browser = inAppBrowserWebView
+        val closedRequestId = inAppBrowserRequestId
+        val closedUrl = inAppBrowserOpenedUrl
+        val finishClose = {
+            try {
+                browser?.stopLoading()
+                browser?.destroy()
+            } catch (_: Exception) {
+            }
+            inAppBrowserWebView = null
+            inAppBrowserChrome = null
+            if (::rootLayout.isInitialized) {
+                rootLayout.removeView(overlay)
+            }
+            inAppBrowserOverlay = null
+            inAppBrowserClosing = false
+            inAppBrowserRequestId = ""
+            inAppBrowserOpenedUrl = ""
+            notifyPwaInAppBrowserClosed(closedRequestId, closedUrl)
+        }
+        if (!animated) {
+            finishClose()
+            return
+        }
+        val h = overlay.height.toFloat().coerceAtLeast(1f)
+        overlay.animate()
+            .translationY(h)
+            .setDuration(300L)
+            .withEndAction { finishClose() }
+            .start()
+    }
+
+    /**
+     * Android 14+ protects USE_FULL_SCREEN_INTENT as a special app access.
+     * It cannot be granted silently by an APK, so take the user directly to
+     * Beamio's system-controlled permission page on the first launch.
+     */
+    private fun maybeOpenFullScreenIntentSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        if (fullScreenIntentSettingsLaunched) return
+
+        val notificationManager = getSystemService(android.app.NotificationManager::class.java)
+            ?: return
+        if (notificationManager.canUseFullScreenIntent()) return
+
+        fullScreenIntentSettingsLaunched = true
+        val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        try {
+            startActivity(intent)
+            Log.i("BeamioVoiceCall", "Opened full-screen intent access for first launch")
+        } catch (error: Exception) {
+            Log.w("BeamioVoiceCall", "Full-screen intent settings unavailable", error)
+            BeamioTelecomService.openIncomingCallSettings(this)
+        }
+    }
+
+    /**
+     * Ask for "Appear on top" so a call that rings while another app is open
+     * gets the full-screen page instead of the small system card
+     * ([BeamioOverlayAccess]). Never during a ringing or live call.
+     */
+    private fun maybeAskOverlayAccess() {
+        if (overlayAccessDialog?.isShowing == true || isFinishing) return
+        val fsiReady = Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+            getSystemService(android.app.NotificationManager::class.java)?.canUseFullScreenIntent() == true
+        val callBusy = BeamioTelecomService.hasLiveCall() ||
+            BeamioTelecomService.hasRingingCall() ||
+            InCallScreenModel.isLive() ||
+            IncomingCallActivity.isShowing() ||
+            IncomingCallActivity.isPresentInFlight()
+        if (!BeamioOverlayAccess.shouldAskNow(this, fsiReady, callBusy)) return
+        BeamioOverlayAccess.markAsked(this)
+        Log.i("BeamioOverlayAccess", "Asking for overlay access")
+        overlayAccessDialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.overlay_access_title)
+            .setMessage(R.string.overlay_access_message)
+            .setPositiveButton(R.string.overlay_access_allow) { _, _ -> openOverlayAccessSettings() }
+            .setNegativeButton(R.string.overlay_access_later, null)
+            .setOnDismissListener { overlayAccessDialog = null }
+            .show()
+    }
+
+    private fun openOverlayAccessSettings() {
+        val pkg = Uri.parse("package:$packageName")
+        val opened = runCatching {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkg))
+        }.recoverCatching {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg))
+        }
+        Log.i("BeamioOverlayAccess", "Overlay settings opened=${opened.isSuccess}")
+    }
+
+    /**
+     * PM R766/R771/R789 (spec §25.22.1, §25.52CT.4, §25.52CV.2): the sensitive methods are not @JavascriptInterface on
+     * [CashTreesJsBridge]; the page reaches them through window.BeamioShell ([BeamioShellChannel], appassets main frame
+     * only) and window.BeamioChat. This subclass re-exposes them on CashTreesAndroid for pages that have not switched yet
+     * (QA transition only). It is injected only when BuildConfig.LEGACY_SENSITIVE_BRIDGE is true; a build with it is not
+     * a release package (PM R788). chatModuleCommand keeps the scheme 2 top-level origin gate.
+     */
+    private inner class CashTreesJsBridgeLegacy : CashTreesJsBridge() {
+        @JavascriptInterface override fun openURL(url: String) = super.openURL(url)
+        @JavascriptInterface override fun openInAppBrowser(urlOrJson: String) = super.openInAppBrowser(urlOrJson)
+        @JavascriptInterface override fun saveFile(json: String) = super.saveFile(json)
+        @JavascriptInterface override fun queryInstalledApps(json: String): String = super.queryInstalledApps(json)
+        @JavascriptInterface override fun listInstalledWalletApps(): String = super.listInstalledWalletApps()
+        @JavascriptInterface override fun listInstalledWalletApps(json: String): String = super.listInstalledWalletApps(json)
+        @JavascriptInterface override fun scanQr(requestId: String) = super.scanQr(requestId)
+        @JavascriptInterface override fun queryIncomingCallOutcome(json: String) = super.queryIncomingCallOutcome(json)
+        @JavascriptInterface override fun notifyVoiceMicReady(json: String) = super.notifyVoiceMicReady(json)
+        @JavascriptInterface override fun requestCameraCapture(json: String) = super.requestCameraCapture(json)
+        @JavascriptInterface override fun bindPushIdentity(json: String) = super.bindPushIdentity(json)
+        @JavascriptInterface override fun postPgpCiphertext(json: String) = super.postPgpCiphertext(json)
+        @JavascriptInterface override fun setNativeSiNodeRoster(json: String) = super.setNativeSiNodeRoster(json)
+        @JavascriptInterface override fun setNativeVoiceRelayNodes(json: String) = super.setNativeVoiceRelayNodes(json)
+        @JavascriptInterface override fun cacheCallerAvatars(json: String) = super.cacheCallerAvatars(json)
+        @JavascriptInterface override fun prepareSystemCall(json: String) = super.prepareSystemCall(json)
+        @JavascriptInterface override fun cancelPreparedSystemCall(json: String) = super.cancelPreparedSystemCall(json)
+        @JavascriptInterface override fun startSystemCall(json: String) = super.startSystemCall(json)
+        @JavascriptInterface override fun reportIncomingSystemCall(json: String) = super.reportIncomingSystemCall(json)
+        @JavascriptInterface override fun endSystemCall(json: String) = super.endSystemCall(json)
+        @JavascriptInterface override fun startNativeVoiceMic(): Boolean = super.startNativeVoiceMic()
+        @JavascriptInterface override fun stopNativeVoiceMic() = super.stopNativeVoiceMic()
+        @JavascriptInterface override fun chatModuleCommand(json: String) = super.chatModuleCommand(json)
+        @JavascriptInterface override fun chatModuleSignResponse(json: String) = super.chatModuleSignResponse(json)
+    }
+
+    private fun applyEmbeddedPwaUpdateFromBridge() {
+        if (::embeddedPwaHost.isInitialized && !embeddedPwaHost.remotePwaUpdate) {
+            // Defensive: store builds do not expose the bridge function at all.
+            Log.i("BeamioEmbeddedPwa", "applyEmbeddedPwaUpdate disabled (store build)")
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject()
+                    .put("action", "applyEmbeddedPwaUpdate")
+                    .put("ok", false)
+                    .put("reason", "ota_disabled"),
+            )
+            return
+        }
+        if (!useEmbeddedPwa || !::webView.isInitialized || !::embeddedPwaHost.isInitialized) {
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject()
+                    .put("action", "applyEmbeddedPwaUpdate")
+                    .put("ok", false)
+                    .put("error", "embedded_pwa_unavailable"),
+            )
+            return
+        }
+        try {
+            embeddedPwaHost.bundleStore.promoteStagingToActive()
+            embeddedPwaHost.rebuildAssetLoader()
+            val ver = embeddedPwaHost.bundleStore.activeVersion()
+            embeddedPwaHost.injectVersionGlobals(webView)
+            webView.loadUrl(EmbeddedPwaConstants.entryUrl, HOME_DOCUMENT_REQUEST_HEADERS)
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject()
+                    .put("action", "applyEmbeddedPwaUpdate")
+                    .put("ok", true)
+                    .put("ver", ver),
+            )
+        } catch (e: Exception) {
+            dispatchAndroidBridgeJsonToWeb(
+                JSONObject()
+                    .put("action", "applyEmbeddedPwaUpdate")
+                    .put("ok", false)
+                    .put("error", e.message ?: "Update failed"),
+            )
+        }
+    }
+
+    private fun dispatchEmbeddedPwaUpdateAvailable(currentVer: String, pendingVer: String) {
+        Log.i(
+            "BeamioEmbeddedPwa",
+            "dispatching OTA event current=$currentVer pending=$pendingVer",
+        )
+        // Event text lives in the `ota` source set; the store build type returns null and sends nothing.
+        val event = EmbeddedPwaOtaFactory.updateAvailableEvent(currentVer, pendingVer) ?: return
+        dispatchAndroidBridgeJsonToWeb(event)
+        if (::webView.isInitialized && ::embeddedPwaHost.isInitialized) {
+            embeddedPwaHost.injectVersionGlobals(webView)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun onCreate(savedInstanceState: Bundle?) {
+        val wakeForCall = intent?.getBooleanExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, false) == true
+        if (wakeForCall) {
+            setTheme(R.style.Theme_CaehTrees_IncomingCall)
+        }
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        BeamioNativeChatHooks.install(applicationContext)
+        // The PWA pushes its own roster; the shell refreshes `getAllNodes` itself instead.
+        BeamioChatPgpStore.onRosterUpsertFromWeb = { ctx -> BeamioGuardianRoster.kick(ctx) }
+        BeamioGuardianRoster.kick(this)
+        applyTransparentStatusBar()
+        // Do NOT moveTaskToBack on wake-for-call. Glass IncomingCallActivity is
+        // same-task translucent; putting the task behind the launcher hides the
+        // glass with MainActivity (browser→Android "no incoming window").
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        activeInstance = this
+        allowShowOverLockScreenForVoiceWake(intent)
+        BeamioTelecomService.ensurePhoneAccount(this)
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (inAppBrowserOverlay != null) {
+                        val browser = inAppBrowserWebView
+                        if (browser != null && browser.canGoBack()) {
+                            browser.goBack()
+                        } else {
+                            dismissInAppBrowser(animated = true)
+                        }
+                        return
+                    }
+                    if (::webView.isInitialized && webView.canGoBack()) {
+                        webView.goBack()
+                    } else {
+                        finish()
+                    }
+                }
+            },
+        )
+
+        val jsBridge: CashTreesJsBridge =
+            if (BuildConfig.LEGACY_SENSITIVE_BRIDGE) CashTreesJsBridgeLegacy() else CashTreesJsBridge()
+        CashTreesWebConsoleRelay.logAppBoot()
+        CashTreesPushRegistration.hydrateFromPrefs(this)
+        CashTreesPushRegistration.onTokenForWeb = { token ->
+            runOnUiThread {
+                dispatchAndroidBridgeJsonToWeb(
+                    CashTreesPushRegistration.payloadForWebEvent(this, token),
+                )
+            }
+        }
+        embeddedPwaHost = EmbeddedPwaHost(this)
+        NativeKeySdkBinding.install(this)
+        NativeKeyImportRoute.register(nativeKeyImportOpener)
+        NativeRecoveryRoute.register(nativeRecoveryOpener)
+        if (QaWriteGuard.isActive) installQaWriteGuardNativeHooks()
+        NativeAccountCreateRoute.register(nativeAccountCreateOpener)
+        rootLayout = FrameLayout(this).apply {
+            if (!wakeForCall) {
+                setBackgroundColor(Color.parseColor("#f8f9fa"))
+            }
+        }
+        setContentView(rootLayout)
+        hideBottomSystemBar()
+        captureBeamioDeepLink(intent)
+        // Fresh Play install: recover the invite / merchant / coupon link the landing page stashed.
+        InstallReferrerDeepLink.consumeOnce(this) { https ->
+            runOnUiThread {
+                if (deepLinkApplied || pendingDeepLinkHttps != null) return@runOnUiThread
+                pendingDeepLinkHttps = https
+                applyPendingDeepLinkIfReady()
+            }
+        }
+
+        bootstrapExecutor.execute {
+            try {
+                embeddedPwaHost.bootstrapIfNeeded()
+                runOnUiThread { mountEmbeddedWebView(jsBridge) }
+            } catch (error: Exception) {
+                // Never switch to the live website when the embedded bundle fails.
+                // Doing so changes the storage/runtime source during startup and can
+                // make a valid local wallet look like a fresh installation.
+                Log.e("BeamioEmbeddedPwa", "embedded PWA bootstrap failed; remote fallback disabled", error)
+                runOnUiThread { mountEmbeddedUnavailableWebView(jsBridge) }
+            }
+        }
+    }
+
+    private fun captureBeamioDeepLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        val https = BeamioDeepLink.resolveCustomSchemeToHttps(data) ?: return
+        pendingDeepLinkHttps = https
+        applyPendingDeepLinkIfReady()
+    }
+
+    /**
+     * Deliver EIP-3009 auth from `beamio://open?receiveUsdcAuth=…` into the live PWA
+     * without a full document reload (reload would drop Home's waiting listener).
+     * Dual channel: CustomEvent `beamioReceiveUsdcAuth` + sessionStorage + URL query.
+     */
+    private fun injectReceiveUsdcAuthToPwa(authPayload: String) {
+        if (!::webView.isInitialized) return
+        val trimmed = authPayload.trim()
+        if (trimmed.isEmpty()) return
+        val quoted = JSONObject.quote(trimmed)
+        val js =
+            """
+            (function(){
+              try {
+                var detail = $quoted;
+                try { sessionStorage.setItem('beamio:receiveUsdcAuth', detail); } catch (e) {}
+                try {
+                  var u = new URL(window.location.href);
+                  u.searchParams.set('receiveUsdcAuth', detail);
+                  history.replaceState({}, '', u.pathname + u.search + u.hash);
+                } catch (e) {}
+                window.dispatchEvent(new CustomEvent('beamioReceiveUsdcAuth', { detail: detail }));
+                try { window.dispatchEvent(new CustomEvent('beamio:deeplink')); } catch (e) {}
+              } catch (e) {}
+            })();
+            """.trimIndent()
+        webView.evaluateJavascript(js, null)
+        CashTreesWebConsoleRelay.logNative("injected beamioReceiveUsdcAuth (${trimmed.length} chars)")
+    }
+
+    /**
+     * Deliver Smart Wallet USDC.transfer tx hash from `beamio://open?receiveUsdcTx=…`.
+     * Dual channel: CustomEvent `beamioReceiveUsdcTx` + sessionStorage + URL query.
+     */
+    private fun injectReceiveUsdcTxToPwa(txPayload: String) {
+        if (!::webView.isInitialized) return
+        val trimmed = txPayload.trim()
+        if (trimmed.isEmpty()) return
+        val quoted = JSONObject.quote(trimmed)
+        val js =
+            """
+            (function(){
+              try {
+                var detail = $quoted;
+                try { sessionStorage.setItem('beamio:receiveUsdcTx', detail); } catch (e) {}
+                try {
+                  var u = new URL(window.location.href);
+                  u.searchParams.set('receiveUsdcTx', detail);
+                  history.replaceState({}, '', u.pathname + u.search + u.hash);
+                } catch (e) {}
+                window.dispatchEvent(new CustomEvent('beamioReceiveUsdcTx', { detail: detail }));
+                try { window.dispatchEvent(new CustomEvent('beamio:deeplink')); } catch (e) {}
+              } catch (e) {}
+            })();
+            """.trimIndent()
+        webView.evaluateJavascript(js, null)
+        CashTreesWebConsoleRelay.logNative("injected beamioReceiveUsdcTx (${trimmed.length} chars)")
+    }
+
+    private fun applyPendingDeepLinkIfReady() {
+        val https = pendingDeepLinkHttps ?: return
+        if (!::webView.isInitialized) return
+        pendingDeepLinkHttps = null
+        deepLinkApplied = true
+        // NFC card links are deprecated (PM R1664): a SUN URL from any entry (custom scheme, beamio_dl, install
+        // referrer) is dropped here, never mapped into the app.
+        if (isBlockedSunUri(https) || (BeamioDeepLink.unwrapAppDownloadLandingUri(https)?.let { isBlockedSunUri(it) } == true)) {
+            if (BuildConfig.DEBUG) Log.i("BeamioDeepLink", "dropped NFC SUN link")
+            return
+        }
+        try {
+            val receiveAuth = https.getQueryParameter("receiveUsdcAuth")?.trim().orEmpty()
+            val receiveTx = https.getQueryParameter("receiveUsdcTx")?.trim().orEmpty()
+            if (receiveAuth.isNotEmpty() || receiveTx.isNotEmpty()) {
+                // Prefer inject-without-reload when the embedded PWA is already running.
+                val alreadyLoaded =
+                    !webView.url.isNullOrBlank() &&
+                        webView.progress >= 100
+                if (alreadyLoaded) {
+                    if (receiveAuth.isNotEmpty()) injectReceiveUsdcAuthToPwa(receiveAuth)
+                    if (receiveTx.isNotEmpty()) injectReceiveUsdcTxToPwa(receiveTx)
+                    return
+                }
+            }
+            if (useEmbeddedPwa && ::embeddedPwaHost.isInitialized) {
+                // Belt-and-suspenders: unwrap `/app-download?invite=` before local map.
+                val resolved = BeamioDeepLink.unwrapAppDownloadLandingUri(https) ?: https
+                embeddedPwaHost.mapBeamioAppUrlToLocal(resolved)?.let { local ->
+                    webView.loadUrl(local.toString())
+                    if (receiveAuth.isNotEmpty() || receiveTx.isNotEmpty()) {
+                        // Cold start / first paint: inject again after load settles.
+                        pendingSystemCallHandler.postDelayed(
+                            {
+                                if (receiveAuth.isNotEmpty()) injectReceiveUsdcAuthToPwa(receiveAuth)
+                                if (receiveTx.isNotEmpty()) injectReceiveUsdcTxToPwa(receiveTx)
+                            },
+                            400L,
+                        )
+                    }
+                    return
+                }
+            }
+            // Consumer Android must never switch the WebView to the remote
+            // /app/ origin: that creates a second IndexedDB/PouchDB namespace
+            // and makes an existing wallet look like a fresh install.
+            if (receiveAuth.isNotEmpty() || receiveTx.isNotEmpty()) {
+                if (receiveAuth.isNotEmpty()) injectReceiveUsdcAuthToPwa(receiveAuth)
+                if (receiveTx.isNotEmpty()) injectReceiveUsdcTxToPwa(receiveTx)
+                return
+            }
+            CashTreesWebConsoleRelay.logNative(
+                "ignored remote deep link while embedded PWA is active: $https",
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun mountEmbeddedWebView(jsBridge: CashTreesJsBridge) {
+        useEmbeddedPwa = true
+        // Plan N (debug -PplanN=true only, R389: page record bridge is the SDK's): copy P before the WebView exists,
+        // read the legacy PGP natively and hand it to the SDK's run(source).
+        ShellRecordChannel.start(this, PgpMigrationRunner.Unavailable)
+        val wv = createEmbeddedWebView(jsBridge, embeddedPwaHost)
+        webView = wv
+        rootLayout.addView(wv)
+        applyPendingDeepLinkIfReady()
+        // Store builds: BuildConfig.REMOTE_PWA_UPDATE is a compile-time false, so this branch and
+        // the update-available event are not compiled in (ota-pwa-protocol.md section 1).
+        if (BuildConfig.REMOTE_PWA_UPDATE) {
+            embeddedPwaHost.startUpdateDaemon { currentVer, pendingVer ->
+                dispatchEmbeddedPwaUpdateAvailable(currentVer, pendingVer)
+            }
+            embeddedPwaHost.checkForUpdatesNow()
+        }
+    }
+
+    /**
+     * PM R1574: shown only when no verified local bundle can be loaded. It says what happened, that nothing was deleted, and
+     * offers Retry, which runs the bootstrap again on the bootstrap executor (never the remote site, never clearing the bundle
+     * or the wallet). On success the local UI replaces this page.
+     */
+    private fun mountEmbeddedUnavailableWebView(jsBridge: CashTreesJsBridge) {
+        useEmbeddedPwa = false
+        val wv = createBaseWebView(jsBridge)
+        webView = wv
+        rootLayout.addView(wv)
+        wv.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (request.url?.toString() == EMBEDDED_RETRY_URL) {
+                    retryEmbeddedBootstrap(jsBridge, view)
+                    return true
+                }
+                return true // this page navigates nowhere else
+            }
+        }
+        wv.loadDataWithBaseURL(EmbeddedPwaConstants.ASSET_LOADER_ORIGIN, EMBEDDED_UNAVAILABLE_HTML, "text/html", "UTF-8", null)
+    }
+
+    private fun retryEmbeddedBootstrap(jsBridge: CashTreesJsBridge, unavailable: WebView) {
+        unavailable.evaluateJavascript("document.getElementById('s').textContent='Loading… / 正在加载…'", null)
+        bootstrapExecutor.execute {
+            try {
+                embeddedPwaHost.bootstrapIfNeeded()
+                runOnUiThread {
+                    rootLayout.removeView(unavailable)
+                    unavailable.destroy()
+                    mountEmbeddedWebView(jsBridge)
+                }
+            } catch (error: Exception) {
+                Log.e("BeamioEmbeddedPwa", "embedded PWA retry failed; still no local bundle", error)
+                runOnUiThread {
+                    unavailable.evaluateJavascript(
+                        "document.getElementById('s').textContent='Still unavailable. Try again later. / 仍无法加载，请稍后再试。'",
+                        null,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 主框架导航：拦截 NFC 卡上写入的 beamio SUN URL，不打开页面、不跳系统浏览器、不映射进应用。
+     * NFC 卡链接在消费者端已弃用（PM R1664）；新旧域名都阻断，规则见 [BeamioNfcSunBlock]（只用于阻断）。
+     */
+    private fun shouldBlockBeamioNdefTopLevelNavigation(u: Uri, isMainFrame: Boolean): Boolean {
+        if (!isMainFrame) return false
+        return isBlockedSunUri(u)
+    }
+
+    /**
+     * Main-frame SUN request in any shell WebView (embedded page, in-app browser and its popups, remote page): answered
+     * locally with an empty 204, so it opens nothing and never reaches the network or the system browser (PM R1664).
+     * Covers loadUrl as well as navigations.
+     */
+    private fun sunBlockedMainFrameResponse(request: WebResourceRequest): android.webkit.WebResourceResponse? {
+        if (!request.isForMainFrame) return null
+        val u = request.url ?: return null
+        if (!isBlockedSunUri(u)) return null
+        if (BuildConfig.DEBUG) Log.i("BeamioNfcSun", "blocked main-frame SUN request")
+        return android.webkit.WebResourceResponse("text/plain", "utf-8", 204, "No Content", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
+    }
+
+    private fun isBlockedSunUri(u: Uri): Boolean {
+        val names = try { u.queryParameterNames } catch (_: Exception) { emptySet<String>() }
+        return BeamioNfcSunBlock.isBlockedSunUrl(u.host, u.path, names)
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createEmbeddedWebView(jsBridge: CashTreesJsBridge, host: EmbeddedPwaHost): WebView {
+        val loader = host.assetLoader
+            ?: throw IllegalStateException("Embedded PWA asset loader not ready")
+        return createBaseWebView(jsBridge).apply {
+            host.installCapabilityScript(this)
+            ShellRecordChannel.attach(this)
+            BeamioChatChannel.attach(
+                this,
+                onCommand = { json, deliver -> handleChatCommand(json, deliver) },
+                onSignResponse = { json -> jsBridge.chatModuleSignResponse(json) },
+            )
+            BeamioShellChannel.attach(this) { call -> handleShellCall(jsBridge, call) }
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest,
+                ): android.webkit.WebResourceResponse? {
+                    val u = request.url ?: return null
+                    sunBlockedMainFrameResponse(request)?.let { return it }
+                    QaWriteGuard.intercept(request, "page")?.let { return it }
+                    // QA DIAG (debug only, never in the release branch): method, host and path of non-asset requests;
+                    // no query string, no headers, no body.
+                    if (BuildConfig.DEBUG && u.host != "appassets.androidplatform.net") {
+                        android.util.Log.i("BeamioQaNet", "req ${request.method} ${u.scheme}://${u.host}${u.path ?: ""}")
+                    }
+                    if (host.shouldBypassEmbeddedAssetLoader(u)) {
+                        return null
+                    }
+                    host.mapBeamioAppUrlToLocal(u)?.let { local ->
+                        return QaWriteGuard.decorateScript(local.path, loader.shouldInterceptRequest(local))
+                    }
+                    if (u.host?.lowercase() == EmbeddedPwaConstants.ASSET_LOADER_DOMAIN) {
+                        val local = host.mapEmbeddedAssetUrlToLocal(u)
+                        return QaWriteGuard.decorateScript(local.path, loader.shouldInterceptRequest(local))
+                    }
+                    return null
+                }
+
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val u = request.url ?: return false
+                    if (shouldBlockBeamioNdefTopLevelNavigation(u, request.isForMainFrame)) return true
+                    if (request.isForMainFrame) {
+                        host.mapBeamioAppUrlToLocal(u)?.let { local ->
+                            view.loadUrl(local.toString())
+                            return true
+                        }
+                        if (leaveEmbeddedForExternal(u.toString())) return true
+                    }
+                    return false
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                    if (url.isNullOrEmpty()) return false
+                    val u = Uri.parse(url)
+                    if (shouldBlockBeamioNdefTopLevelNavigation(u, true)) return true
+                    host.mapBeamioAppUrlToLocal(u)?.let { local ->
+                        view?.loadUrl(local.toString())
+                        return true
+                    }
+                    if (leaveEmbeddedForExternal(url)) return true
+                    return false
+                }
+
+                override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                    embeddedTopOrigin = ChatOriginGate.originOf(url) // PM R756: chat channel origin gate
+                    injectWebBridgeScripts(view, "onPageStarted")
+                }
+
+                override fun onPageFinished(view: WebView, url: String?) {
+                    embeddedTopOrigin = ChatOriginGate.originOf(url) // PM R756: chat channel origin gate
+                    host.injectVersionGlobals(view)
+                    injectWebBridgeScripts(view, "onPageFinished")
+                    applyTransparentStatusBar()
+                    embeddedPwaUpdateReplayAttempt = 0
+                    pendingSystemCallHandler.removeCallbacks(embeddedPwaUpdateReplayRunnable)
+                    pendingSystemCallHandler.postDelayed(
+                        embeddedPwaUpdateReplayRunnable,
+                        350L,
+                    )
+                    dispatchPendingSystemCallAction()
+                    if (intent.getBooleanExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, false)) {
+                        mailboxWakeDispatchAttempt = 0
+                        pendingSystemCallHandler.removeCallbacks(mailboxWakeDispatchRunnable)
+                        pendingSystemCallHandler.post(mailboxWakeDispatchRunnable)
+                    }
+                    requestShowActiveCall(intent)
+                    pendingSystemCallDispatchAttempt = 0
+                    pendingSystemCallHandler.removeCallbacks(pendingSystemCallDispatchRunnable)
+                    pendingSystemCallHandler.postDelayed(
+                        pendingSystemCallDispatchRunnable,
+                        250L,
+                    )
+                }
+
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: android.webkit.WebResourceError,
+                ) {
+                    if (request.isForMainFrame) {
+                        CashTreesWebConsoleRelay.logNative(
+                            "embedded main frame error url=${request.url} code=${error.errorCode} ${error.description}",
+                        )
+                    }
+                    if (BuildConfig.DEBUG && !request.isForMainFrame) {
+                        val u = request.url
+                        android.util.Log.w("BeamioQaNet", "neterr ${request.method} ${u.scheme}://${u.host}${u.path ?: ""} code=${error.errorCode} ${error.description}")
+                    }
+                }
+
+                // QA DIAG (debug only): HTTP status >= 400 for any request (path only, no query or body).
+                override fun onReceivedHttpError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    errorResponse: android.webkit.WebResourceResponse,
+                ) {
+                    if (BuildConfig.DEBUG) {
+                        val u = request.url
+                        android.util.Log.w("BeamioQaNet", "http ${errorResponse.statusCode} ${request.method} ${u.scheme}://${u.host}${u.path ?: ""} ${errorResponse.reasonPhrase ?: ""}")
+                    }
+                }
+
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    view.loadUrl(EmbeddedPwaConstants.entryUrl, HOME_DOCUMENT_REQUEST_HEADERS)
+                    return true
+                }
+            }
+            CashTreesWebConsoleRelay.logNative("loading embedded PWA ${EmbeddedPwaConstants.entryUrl}")
+            loadUrl(EmbeddedPwaConstants.entryUrl, HOME_DOCUMENT_REQUEST_HEADERS)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createRemoteWebView(jsBridge: CashTreesJsBridge, startUrl: String): WebView {
+        return createBaseWebView(jsBridge).apply {
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? =
+                    sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, "remote")
+
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val u = request.url ?: return false
+                    return shouldBlockBeamioNdefTopLevelNavigation(u, request.isForMainFrame)
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                    if (url.isNullOrEmpty()) return false
+                    return shouldBlockBeamioNdefTopLevelNavigation(Uri.parse(url), true)
+                }
+
+                override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                    injectWebBridgeScripts(view, "remote-onPageStarted")
+                }
+
+                override fun onPageFinished(view: WebView, url: String?) {
+                    injectWebBridgeScripts(view, "remote-onPageFinished")
+                    applyTransparentStatusBar()
+                }
+
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    view.loadUrl(startUrl, HOME_DOCUMENT_REQUEST_HEADERS)
+                    return true
+                }
+            }
+            loadUrl(startUrl, HOME_DOCUMENT_REQUEST_HEADERS)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createBaseWebView(jsBridge: CashTreesJsBridge): WebView {
+        // chrome://inspect for WebView console / getUserMedia diag: debug builds
+        // only, never in a Release (store) build.
+        if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true)
+        }
+        return WebView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            this.webChromeClient = this@MainActivity.webChromeClient
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.loadWithOverviewMode = true
+            settings.useWideViewPort = true
+            settings.setSupportZoom(false)
+            settings.builtInZoomControls = false
+            isVerticalScrollBarEnabled = true
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(Color.parseColor("#f8f9fa"))
+            addJavascriptInterface(jsBridge, "CashTreesAndroid")
+            addJavascriptInterface(CashTreesWebConsoleRelay.JsRelay(), CashTreesWebConsoleRelay.BRIDGE_NAME)
+            CashTreesWebConsoleRelay.registerDocumentStartScript(this)
+            QaWriteGuard.installWebViewHooks(this) // debug QA builds only; no-op stub in release and store (PM R675)
+        }
+    }
+
+    private fun injectWebBridgeScripts(webView: WebView, reason: String) {
+        CashTreesWebConsoleRelay.reinject(webView, reason)
+    }
+
+    private fun dispatchPendingSystemCallAction() {
+        val pending = BeamioTelecomService.peekPendingSystemCallAction(this) ?: return
+        Log.i(
+            "BeamioVoiceCall",
+            "dispatching pending action=${pending.getString("action").orEmpty()} " +
+                "callIdPresent=${pending.getString("callId").orEmpty().isNotBlank()}",
+        )
+        dispatchAndroidBridgeJsonToWeb(
+            JSONObject()
+                .put("action", pending.getString("action").orEmpty())
+                .put("callId", pending.getString("callId").orEmpty())
+                .put("sessionId", pending.getString("sessionId").orEmpty()),
+        ) {
+            // The action has reached the WebView bridge. Remove it only after
+            // evaluateJavascript completes, so a cold-start retry cannot
+            // replay an already-consumed Telecom action.
+            BeamioTelecomService.clearPendingSystemCallAction(this)
+            pendingSystemCallDispatchAttempt = 0
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        uiVisible = true
+    }
+
+    private fun isCallScreenCoveringPage(): Boolean =
+        InCallScreenModel.isLive() ||
+            InCallActivity.isShowing() ||
+            IncomingCallActivity.isShowing() ||
+            IncomingCallActivity.isPresentInFlight()
+
+    /** onPause: copy the WebView pixels while they are still on screen. */
+    private fun captureCallCoverSnapshot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!::webView.isInitialized || !isCallScreenCoveringPage()) return
+        val w = webView.width
+        val h = webView.height
+        if (w <= 0 || h <= 0 || !webView.isAttachedToWindow) return
+        val loc = IntArray(2)
+        webView.getLocationInWindow(loc)
+        val bitmap = runCatching { Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888) }.getOrNull() ?: return
+        val generation = ++callCoverGeneration
+        try {
+            PixelCopy.request(
+                window,
+                Rect(loc[0], loc[1], loc[0] + w, loc[1] + h),
+                bitmap,
+                { result ->
+                    if (result != PixelCopy.SUCCESS || generation != callCoverGeneration || uiResumed) {
+                        bitmap.recycle()
+                        return@request
+                    }
+                    dropCallCoverSnapshot()
+                    callCoverSnapshot = bitmap
+                    // onStop may already have run before the copy finished.
+                    if (!uiVisible) showCallCoverSnapshot()
+                },
+                Handler(Looper.getMainLooper()),
+            )
+        } catch (e: IllegalArgumentException) {
+            bitmap.recycle()
+        }
+    }
+
+    /** onStop: put the copied frame over the WebView so the return draws it at once. */
+    private fun showCallCoverSnapshot() {
+        val bitmap = callCoverSnapshot ?: return
+        if (!::rootLayout.isInitialized || !::webView.isInitialized) return
+        val view = callCoverView ?: ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_XY
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }.also { callCoverView = it }
+        view.setImageBitmap(bitmap)
+        view.translationX = webView.left.toFloat()
+        view.translationY = webView.top.toFloat()
+        if (view.parent == null) {
+            val index = rootLayout.indexOfChild(webView)
+            rootLayout.addView(view, index + 1, FrameLayout.LayoutParams(webView.width, webView.height))
+        }
+        view.visibility = View.VISIBLE
+    }
+
+    /** onResume: drop the cover once the WebView has a fresh frame to draw. */
+    private fun releaseCallCoverWhenWebViewDraws() {
+        val view = callCoverView
+        if (view == null || view.parent == null) {
+            dropCallCoverSnapshot()
+            return
+        }
+        val generation = ++callCoverGeneration
+        val remove = Runnable {
+            if (generation == callCoverGeneration) dropCallCoverSnapshot()
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && ::webView.isInitialized) {
+            webView.postVisualStateCallback(
+                generation.toLong(),
+                object : WebView.VisualStateCallback() {
+                    override fun onComplete(requestId: Long) {
+                        // The WebView draws the fresh frame on its next draw; remove after it.
+                        rootLayout.postOnAnimation(remove)
+                    }
+                },
+            )
+        }
+        // Never leave a stale picture over the live page.
+        rootLayout.postDelayed(remove, 1_500L)
+    }
+
+    private fun dropCallCoverSnapshot() {
+        callCoverView?.let { view ->
+            view.setImageDrawable(null)
+            (view.parent as? ViewGroup)?.removeView(view)
+        }
+        callCoverSnapshot?.recycle()
+        callCoverSnapshot = null
+    }
+
+    override fun onResume() {
+        super.onResume()
+        uiResumed = true
+        releaseCallCoverWhenWebViewDraws()
+        // Glass IncomingCallActivity is the only incoming UI; drop Samsung shade ghosts.
+        // Skip while waking for an incoming call — raise-then-present races onResume
+        // before glass exists; dismiss would stop FGS and kill RINGING mid-dial.
+        val wakeForCall = intent.getBooleanExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, false)
+        if (wakeForCall || IncomingCallActivity.isPresentInFlight()) {
+            Log.i("BeamioVoiceCall", "Skip stale dismiss on resume wakeForCall=$wakeForCall")
+        } else {
+            BeamioTelecomService.dismissStaleIncomingUi(this)
+        }
+        // A call answered in the background has no microphone FGS type yet (Android 14+).
+        BeamioCallForegroundService.upgradeMicrophoneIfNeeded("MainActivity.onResume")
+        if (::rootLayout.isInitialized) {
+            rootLayout.setBackgroundColor(Color.parseColor("#f8f9fa"))
+        }
+        applyTransparentStatusBar()
+        maybeOpenFullScreenIntentSettings()
+        maybeAskOverlayAccess()
+        maybeEnableNfcForegroundDispatch()
+        // Launcher badge follows active notifications: drop stale offline alerts so the
+        // PWA unread count (publishAppState) is the only badge source once we are visible.
+        CashTreesNativeAppStateBridge.clearOfflineChatAlerts(this)
+        if (useEmbeddedPwa && ::embeddedPwaHost.isInitialized) {
+            embeddedPwaHost.checkForUpdatesNow()
+        }
+        if (InCallScreenModel.isLive() && !InCallScreenModel.isPresented() && !InCallActivity.isShowing()) {
+            showInCallReturnPill()
+        } else if (!InCallScreenModel.isLive()) {
+            hideInCallReturnPillInternal()
+        }
+        dispatchAndroidBridgeJsonToWeb(
+            JSONObject().put("action", "appLifecycle").put("phase", "active"),
+        )
+        publishDeliveryHealth()
+    }
+
+    /** Push delivery check (background restriction, last force stop) → PWA banner. */
+    private fun publishDeliveryHealth() {
+        val app = applicationContext
+        Thread {
+            val report = runCatching { BeamioDeliveryHealth.check(app) }.getOrNull() ?: return@Thread
+            runOnUiThread { dispatchAndroidBridgeJsonToWeb(report.toJson()) }
+        }.start()
+    }
+
+    private fun showInCallReturnPill() {
+        if (!::rootLayout.isInitialized) return
+        if (!InCallScreenModel.isLive()) {
+            hideInCallReturnPillInternal()
+            return
+        }
+        val existing = inCallReturnPill
+        if (existing != null) {
+            existing.visibility = View.VISIBLE
+            refreshInCallReturnPillLabel()
+            inCallReturnPillHandler.removeCallbacks(inCallReturnPillTick)
+            inCallReturnPillHandler.post(inCallReturnPillTick)
+            return
+        }
+        val density = resources.displayMetrics.density
+        val pill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.bg_in_call_return_pill)
+            val padH = (14 * density + 0.5f).toInt()
+            val padV = (10 * density + 0.5f).toInt()
+            setPadding(padH, padV, padH, padV)
+            elevation = 8 * density
+            isClickable = true
+            isFocusable = true
+            contentDescription = getString(R.string.in_call_return)
+            setOnClickListener {
+                val snap = InCallScreenModel.snapshot()
+                InCallActivity.present(
+                    this@MainActivity,
+                    snap.callId,
+                    snap.sessionId,
+                    tag = snap.tag,
+                    address = snap.address,
+                )
+                hideInCallReturnPillInternal()
+            }
+        }
+        val icon = ImageView(this).apply {
+            setImageResource(R.drawable.ic_in_call_phone)
+            val size = (18 * density + 0.5f).toInt()
+            layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                marginEnd = (8 * density + 0.5f).toInt()
+            }
+            imageTintList = android.content.res.ColorStateList.valueOf(Color.WHITE)
+        }
+        val label = TextView(this).apply {
+            id = View.generateViewId()
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            text = getString(R.string.in_call_return)
+            tag = "in_call_return_label"
+        }
+        pill.addView(icon)
+        pill.addView(label)
+        val statusTop = ViewCompat.getRootWindowInsets(rootLayout)
+            ?.getInsets(WindowInsetsCompat.Type.statusBars())
+            ?.top
+            ?: 0
+        val lp = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            topMargin = statusTop + (12 * density + 0.5f).toInt()
+            if (topMargin < (48 * density).toInt()) {
+                topMargin = (48 * density + 0.5f).toInt()
+            }
+        }
+        rootLayout.addView(pill, lp)
+        inCallReturnPill = pill
+        refreshInCallReturnPillLabel()
+        inCallReturnPillHandler.removeCallbacks(inCallReturnPillTick)
+        inCallReturnPillHandler.post(inCallReturnPillTick)
+    }
+
+    private fun hideInCallReturnPillInternal() {
+        inCallReturnPillHandler.removeCallbacks(inCallReturnPillTick)
+        val pill = inCallReturnPill ?: return
+        inCallReturnPill = null
+        if (::rootLayout.isInitialized) {
+            rootLayout.removeView(pill)
+        }
+    }
+
+    private fun refreshInCallReturnPillLabel() {
+        val pill = inCallReturnPill as? ViewGroup ?: return
+        val label = (0 until pill.childCount)
+            .map { pill.getChildAt(it) }
+            .filterIsInstance<TextView>()
+            .firstOrNull { it.tag == "in_call_return_label" }
+            ?: return
+        val answeredAt = InCallScreenModel.snapshot().answeredAtMs
+        val elapsed = if (answeredAt <= 0L) {
+            0L
+        } else {
+            ((System.currentTimeMillis() - answeredAt) / 1000L).coerceAtLeast(0L)
+        }
+        val minutes = elapsed / 60L
+        val seconds = elapsed % 60L
+        label.text = String.format("%02d:%02d  %s", minutes, seconds, getString(R.string.in_call_return))
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != CashTreesPushRegistration.REQUEST_POST_NOTIFICATIONS) return
+        val granted =
+            grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+        CashTreesPushRegistration.onPostNotificationsPermissionResult(this, granted)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        allowShowOverLockScreenForVoiceWake(intent)
+        captureBeamioDeepLink(intent)
+        if (intent.getBooleanExtra(EXTRA_SHOW_IN_CALL_RETURN_PILL, false)) {
+            showInCallReturnPill()
+        }
+        if (intent.getBooleanExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, false)) {
+            mailboxWakeDispatchAttempt = 0
+            pendingSystemCallHandler.removeCallbacks(mailboxWakeDispatchRunnable)
+            pendingSystemCallHandler.post(mailboxWakeDispatchRunnable)
+        }
+        requestShowActiveCall(intent)
+        val action = intent.action ?: return
+        if (
+            action != NfcAdapter.ACTION_TAG_DISCOVERED &&
+            action != NfcAdapter.ACTION_TECH_DISCOVERED &&
+            action != NfcAdapter.ACTION_NDEF_DISCOVERED
+        ) {
+            return
+        }
+        // Card binding is removed (GAP-17): every NFC tag intent is consumed here and goes nowhere else.
+    }
+
+    override fun onPause() {
+        uiResumed = false
+        captureCallCoverSnapshot()
+        try {
+            NfcAdapter.getDefaultAdapter(this)?.disableForegroundDispatch(this)
+        } catch (_: Exception) {
+        }
+        dispatchAndroidBridgeJsonToWeb(
+            JSONObject().put("action", "appLifecycle").put("phase", "inactive"),
+        )
+        super.onPause()
+    }
+
+    override fun onStop() {
+        uiVisible = false
+        showCallCoverSnapshot()
+        dispatchAndroidBridgeJsonToWeb(
+            JSONObject().put("action", "appLifecycle").put("phase", "background"),
+        )
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (activeInstance === this) activeInstance = null
+        dropCallCoverSnapshot()
+        inCallReturnPillHandler.removeCallbacks(inCallReturnPillTick)
+        inCallReturnPill = null
+        pendingSystemCallHandler.removeCallbacksAndMessages(null)
+        mainHandler.removeCallbacks(enableNfcForegroundDispatchRunnable)
+        CashTreesPushRegistration.onTokenForWeb = null
+        dismissInAppBrowser(animated = false)
+        if (::embeddedPwaHost.isInitialized) {
+            embeddedPwaHost.stopUpdateDaemon()
+        }
+        nativeVoiceMic?.stop()
+        nativeVoiceMic = null
+        NativeKeyImportRoute.unregister(nativeKeyImportOpener)
+        NativeRecoveryRoute.unregister(nativeRecoveryOpener)
+        qaEvalReceiver?.let { runCatching { unregisterReceiver(it) } }
+        qaEvalReceiver = null
+        NativeAccountCreateRoute.unregister(nativeAccountCreateOpener)
+        bootstrapExecutor.shutdownNow()
+        super.onDestroy()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideBottomSystemBar()
+            applyTransparentStatusBar()
+        }
+    }
+
+    /** Let a lock-screen Open Beamio tap boot the WebView without dismissing the keyguard. */
+    private fun allowShowOverLockScreenForVoiceWake(source: Intent?) {
+        if (source?.getBooleanExtra(BeamioTelecomService.EXTRA_WAKE_FOR_CALL, false) != true) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+    }
+
+    /** Status bar stays clear so the page shows through. No black strip above the home screen. */
+    private fun applyTransparentStatusBar() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = true
+    }
+
+    /** Hide navigation bar; user can swipe edge to show it briefly (transient). */
+    private fun hideBottomSystemBar() {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.navigationBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 }

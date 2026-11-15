@@ -1,0 +1,91 @@
+{
+  "file": "v8-v16-vectors.json",
+  "synthetic": true,
+  "reader": "IdbFormat.kt V8Reader (mirror)",
+  "gate": "13..16 (the shell gate is 13..15 until the patch is applied)",
+  "vectors": [
+    {
+      "id": "V16-01",
+      "title": "v16 object, string, int, bool, null, array (the reader must accept 16)",
+      "hex": "ff14ff106f22056b65794944222a3078353535353535353535353535353535353535353535353535353535353535353535353535353535352209656d61696c4164647222016122016e49062201745422017a3022036172724102490249042400027b06",
+      "expect": {
+        "result": "ok",
+        "value": {
+          "keyID": "0x5555555555555555555555555555555555555555",
+          "emailAddr": "a",
+          "n": 3,
+          "t": true,
+          "z": null,
+          "arr": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "id": "V16-02",
+      "title": "v16 with an ArrayBuffer tag (B): not in the subset, fail closed (layout of B/V not implemented)",
+      "hex": "ff14ff1042020102",
+      "expect": {
+        "result": "refused",
+        "error": "v8 tag 0x42"
+      }
+    },
+    {
+      "id": "V16-03",
+      "title": "v16 with an unknown tag: fail closed",
+      "hex": "ff14ff1079",
+      "expect": {
+        "result": "refused",
+        "error": "v8 tag 0x79"
+      }
+    },
+    {
+      "id": "V16-04",
+      "title": "v17 is refused by the upper bound",
+      "hex": "ff14ff116f22056b65794944222a3078353535353535353535353535353535353535353535353535353535353535353535353535353535352209656d61696c4164647222016122016e49062201745422017a3022036172724102490249042400027b06",
+      "expect": {
+        "result": "refused",
+        "error": "v8 version 17"
+      }
+    },
+    {
+      "id": "V16-05",
+      "title": "v12 is refused by the lower bound",
+      "hex": "ff14ff0c6f22056b65794944222a3078353535353535353535353535353535353535353535353535353535353535353535353535353535352209656d61696c4164647222016122016e49062201745422017a3022036172724102490249042400027b06",
+      "expect": {
+        "result": "refused",
+        "error": "v8 version 12"
+      }
+    },
+    {
+      "id": "V16-06",
+      "title": "v15 with the same bytes is accepted (the gate is 13 to 16)",
+      "hex": "ff14ff0f6f22056b65794944222a3078353535353535353535353535353535353535353535353535353535353535353535353535353535352209656d61696c4164647222016122016e49062201745422017a3022036172724102490249042400027b06",
+      "expect": {
+        "result": "ok",
+        "value": {
+          "keyID": "0x5555555555555555555555555555555555555555",
+          "emailAddr": "a",
+          "n": 3,
+          "t": true,
+          "z": null,
+          "arr": [
+            1,
+            2
+          ]
+        }
+      }
+    },
+    {
+      "id": "V16-07",
+      "title": "v16 with an ArrayBufferView tag (V): not in the subset, fail closed (layout of B/V not implemented)",
+      "hex": "ff14ff10560000",
+      "expect": {
+        "result": "refused",
+        "error": "v8 tag 0x56"
+      }
+    }
+  ]
+}

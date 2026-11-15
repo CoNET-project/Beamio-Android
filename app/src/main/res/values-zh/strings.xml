@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <!-- 原生钱包导入（spec 25.25、25.26.3）。标题和按钮沿用 PWA 锁定页（native_key_required_*）；结果文案键按 spec 25.25.5（imp.err.* 写作 imp_err_*），文案为草稿，待 P-IMP-COPY。 -->
+    <string name="native_key_import_title">导入钱包</string>
+    <string name="native_key_import_body">本设备没有这个账号的钱包密钥，Beamio 已锁定。请输入该账号的私钥（64 位十六进制）或助记词。它只保存在本设备，不会发给页面。</string>
+    <string name="native_key_import_mode_key">私钥</string>
+    <string name="native_key_import_mode_mnemonic">助记词</string>
+    <string name="native_key_import_hint_key">私钥</string>
+    <string name="native_key_import_hint_mnemonic">助记词（12、15 或 24 个词）</string>
+    <string name="native_key_import_button">导入钱包</string>
+    <string name="native_key_import_cancel">取消</string>
+    <string name="native_key_import_ok">已导入</string>
+    <string name="imp_err_format">格式不正确。</string>
+    <string name="imp_err_range">这不是有效的私钥。</string>
+    <string name="imp_err_mnemonic">助记词无效。</string>
+    <string name="imp_err_mismatch">这个密钥不属于该账号。</string>
+    <string name="imp_err_exists">本设备已有钱包密钥，未做任何更改。</string>
+    <string name="imp_err_write">保存失败，请重试。</string>
+    <string name="imp_err_readback">保存后校验失败，未保留任何内容，请重试。</string>
+    <string name="imp_err_not_supported">此版本的应用不支持导入，未保存任何内容。</string>
+    <string name="native_recovery_title">用恢复码恢复</string>
+    <string name="native_recovery_body">输入你的恢复码。它只留在这台设备上，不会交给网页。</string>
+    <string name="native_recovery_hint">恢复码</string>
+    <string name="native_recovery_button">恢复</string>
+    <string name="native_recovery_ok">已恢复。</string>
+    <string name="native_recovery_err_format">这看起来不是恢复码。</string>
+    <string name="native_recovery_err_not_found">没有找到这个恢复码对应的账户。</string>
+    <string name="native_recovery_err_network">网络错误，请重试。</string>
+    <string name="native_recovery_err_backoff">尝试次数太多，请稍后再试。</string>
+    <string name="native_recovery_err_other">恢复失败，请重试。</string>
+    <string name="native_recovery_tab_code">恢复码</string>
+    <string name="native_recovery_tab_password">账号名与密码</string>
+    <string name="native_recovery_hint_account">账号名</string>
+    <string name="native_recovery_hint_password">密码</string>
+    <string name="native_recovery_err_bad_password">账号名或密码不正确。</string>
+    <string name="native_recovery_err_legacy">这个账户使用旧版记录格式，暂时无法在这里恢复。</string>
+    <string name="native_create_title">创建钱包</string>
+    <string name="native_create_body">将在本机生成新的密钥并保存在本机，网页看不到它。</string>
+    <string name="native_create_button">创建</string>
+    <string name="native_create_working">正在创建…</string>
+    <string name="native_create_ok">已创建。</string>
+    <string name="native_create_err_exists">本机已有钱包。</string>
+    <string name="native_create_err_save">无法在本机保存密钥，请重试。</string>
+    <string name="native_create_err_other">创建没有完成，请重试。</string>
+</resources>

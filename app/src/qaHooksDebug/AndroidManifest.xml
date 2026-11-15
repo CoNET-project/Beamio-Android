@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug manifest used instead of src/debug/AndroidManifest.xml only when -PchatQaHooks is set (QA ONLY, PM R591).
+     Same content as src/debug/AndroidManifest.xml plus the native QA evidence page. Release and store never use it. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <receiver
+            android:name="com.beamio.app.BeamioIncomingCallSmokeReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="com.beamio.app.SMOKE_INCOMING_CALL" />
+                <action android:name="com.beamio.app.SMOKE_ANSWER" />
+            </intent-filter>
+        </receiver>
+        <!-- exported=true so `adb shell am start -n <pkg>/com.beamio.app.qa.hooks.QaNativeEvidenceActivity` can open it. -->
+        <activity
+            android:name="com.beamio.app.qa.hooks.QaNativeEvidenceActivity"
+            android:exported="true"
+            android:label="Beamio QA native evidence"
+            android:theme="@android:style/Theme.Material.Light" />
+    </application>
+</manifest>

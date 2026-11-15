@@ -1,0 +1,1724 @@
+{
+  "file": "beamioshell-channel-vectors.v1.json",
+  "purpose": "window.BeamioShell 通道向量（spec r3gf，§25.52EF）。首批为 queryIncomingCallOutcome；本通道其它 action 的用例也放入本文件。合成数据，只用于测试。",
+  "spec": "v1.1-r3gf §25.52EF（依 §25.52DU.1 至 DU.2、§25.52EE.1、§25.52EC.3 至 EC.4 与 PM R857）",
+  "generator": "gen-beamioshell-channel-vectors.mjs",
+  "channel": {
+    "name": "window.BeamioShell",
+    "frame": "必须为主框架（§25.52AA.11.3）",
+    "origin": "允许的来源：Android 为 appassets；iOS 为 cashtrees-local://localhost。来源拒绝不在本文件内，见 §25.52AA.11.3。"
+  },
+  "envelope": {
+    "request": "JSON 字符串 {action, reqId, args}",
+    "ack": "{type:\"ack\", action, reqId, ok} 或 {type:\"ack\", action, reqId, ok:false, error}",
+    "eventChannel": "cashtreesandroid"
+  },
+  "rules": {
+    "ackOrder": "ack 先于全部事件。",
+    "eventOrder": "事件按入参 calls 的顺序，每条恰好一个事件。",
+    "badArgs": "入参形状不符（缺 createdAt、类型不符、超过 50 条、args 无 calls）：整批 ack ok:false，error bad_args，恰好一次；不发事件，不截断，不部分处理（§25.52EE.1、§25.52EF.2）。",
+    "emptyString": "callId、sessionId 为空串是合法值（§25.52DU.1），按一条正常条目处理。无记录时 rang:false，原样回带两个空串字段（§25.52EF.1）。",
+    "rang": "rang 为布尔值，必须输出。callId 或 sessionId 为空串的条目一律不参与匹配，直接为 false（§25.52EH.1）。其余条目：当且仅当 ringRecords 中有 (callId, sessionId) 精确相同的记录，且 nowMs − createdAt ≤ retentionMs 时为 true；否则为 false（§25.52EF.4）。"
+  },
+  "fixture": {
+    "nowMs": 1762000000000,
+    "retentionMs": 259200000,
+    "maxBatch": 50
+  },
+  "comparison": "键集相等（§25.52EC.2）：ack 与每个事件的键集合须与 expect 完全相等；不得多出字段；缺失或多出字段均判失败。比对器须逐键比较两侧，不得只比对 expect 列出的键。",
+  "cases": [
+    {
+      "id": "BS-01",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "正常批次：两条均有记录且在保留期限内，各回 rang:true，按入参顺序",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "c-1",
+            "sessionId": "s-1"
+          },
+          {
+            "callId": "c-2",
+            "sessionId": "s-2"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-01",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-1",
+              "sessionId": "s-1",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-2",
+              "sessionId": "s-2",
+              "createdAt": 1761827200000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-01",
+          "ok": true
+        },
+        "events": [
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-1",
+              "sessionId": "s-1",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-2",
+              "sessionId": "s-2",
+              "rang": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "BS-02",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "rang:false：无响铃记录，结果事件仍必须输出，rang 为 false（不省略）",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": []
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-02",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-3",
+              "sessionId": "s-3",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-02",
+          "ok": true
+        },
+        "events": [
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-3",
+              "sessionId": "s-3",
+              "rang": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "BS-03",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "空串条目：callId、sessionId 为空串是合法值；查不到记录，回 rang:false，原样回带两个空串；同批其它条目照常处理",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "c-4",
+            "sessionId": "s-4"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-03",
+        "args": {
+          "calls": [
+            {
+              "callId": "",
+              "sessionId": "",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-4",
+              "sessionId": "s-4",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-03",
+          "ok": true
+        },
+        "events": [
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "",
+              "sessionId": "",
+              "rang": false
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-4",
+              "sessionId": "s-4",
+              "rang": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "BS-04",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "超过 50 条（51 条）：形状不符，整批 bad_args，恰好一次；不截断，不部分处理，不发事件",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": []
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-04",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-b4-0",
+              "sessionId": "s-b4-0",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-1",
+              "sessionId": "s-b4-1",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-2",
+              "sessionId": "s-b4-2",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-3",
+              "sessionId": "s-b4-3",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-4",
+              "sessionId": "s-b4-4",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-5",
+              "sessionId": "s-b4-5",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-6",
+              "sessionId": "s-b4-6",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-7",
+              "sessionId": "s-b4-7",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-8",
+              "sessionId": "s-b4-8",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-9",
+              "sessionId": "s-b4-9",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-10",
+              "sessionId": "s-b4-10",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-11",
+              "sessionId": "s-b4-11",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-12",
+              "sessionId": "s-b4-12",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-13",
+              "sessionId": "s-b4-13",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-14",
+              "sessionId": "s-b4-14",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-15",
+              "sessionId": "s-b4-15",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-16",
+              "sessionId": "s-b4-16",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-17",
+              "sessionId": "s-b4-17",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-18",
+              "sessionId": "s-b4-18",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-19",
+              "sessionId": "s-b4-19",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-20",
+              "sessionId": "s-b4-20",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-21",
+              "sessionId": "s-b4-21",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-22",
+              "sessionId": "s-b4-22",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-23",
+              "sessionId": "s-b4-23",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-24",
+              "sessionId": "s-b4-24",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-25",
+              "sessionId": "s-b4-25",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-26",
+              "sessionId": "s-b4-26",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-27",
+              "sessionId": "s-b4-27",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-28",
+              "sessionId": "s-b4-28",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-29",
+              "sessionId": "s-b4-29",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-30",
+              "sessionId": "s-b4-30",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-31",
+              "sessionId": "s-b4-31",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-32",
+              "sessionId": "s-b4-32",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-33",
+              "sessionId": "s-b4-33",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-34",
+              "sessionId": "s-b4-34",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-35",
+              "sessionId": "s-b4-35",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-36",
+              "sessionId": "s-b4-36",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-37",
+              "sessionId": "s-b4-37",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-38",
+              "sessionId": "s-b4-38",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-39",
+              "sessionId": "s-b4-39",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-40",
+              "sessionId": "s-b4-40",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-41",
+              "sessionId": "s-b4-41",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-42",
+              "sessionId": "s-b4-42",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-43",
+              "sessionId": "s-b4-43",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-44",
+              "sessionId": "s-b4-44",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-45",
+              "sessionId": "s-b4-45",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-46",
+              "sessionId": "s-b4-46",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-47",
+              "sessionId": "s-b4-47",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-48",
+              "sessionId": "s-b4-48",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-49",
+              "sessionId": "s-b4-49",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b4-50",
+              "sessionId": "s-b4-50",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-04",
+          "ok": false,
+          "error": "bad_args"
+        },
+        "events": []
+      }
+    },
+    {
+      "id": "BS-05",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "边界：恰好 50 条，全部有记录，各回 rang:true，不报错",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "c-b5-0",
+            "sessionId": "s-b5-0"
+          },
+          {
+            "callId": "c-b5-1",
+            "sessionId": "s-b5-1"
+          },
+          {
+            "callId": "c-b5-2",
+            "sessionId": "s-b5-2"
+          },
+          {
+            "callId": "c-b5-3",
+            "sessionId": "s-b5-3"
+          },
+          {
+            "callId": "c-b5-4",
+            "sessionId": "s-b5-4"
+          },
+          {
+            "callId": "c-b5-5",
+            "sessionId": "s-b5-5"
+          },
+          {
+            "callId": "c-b5-6",
+            "sessionId": "s-b5-6"
+          },
+          {
+            "callId": "c-b5-7",
+            "sessionId": "s-b5-7"
+          },
+          {
+            "callId": "c-b5-8",
+            "sessionId": "s-b5-8"
+          },
+          {
+            "callId": "c-b5-9",
+            "sessionId": "s-b5-9"
+          },
+          {
+            "callId": "c-b5-10",
+            "sessionId": "s-b5-10"
+          },
+          {
+            "callId": "c-b5-11",
+            "sessionId": "s-b5-11"
+          },
+          {
+            "callId": "c-b5-12",
+            "sessionId": "s-b5-12"
+          },
+          {
+            "callId": "c-b5-13",
+            "sessionId": "s-b5-13"
+          },
+          {
+            "callId": "c-b5-14",
+            "sessionId": "s-b5-14"
+          },
+          {
+            "callId": "c-b5-15",
+            "sessionId": "s-b5-15"
+          },
+          {
+            "callId": "c-b5-16",
+            "sessionId": "s-b5-16"
+          },
+          {
+            "callId": "c-b5-17",
+            "sessionId": "s-b5-17"
+          },
+          {
+            "callId": "c-b5-18",
+            "sessionId": "s-b5-18"
+          },
+          {
+            "callId": "c-b5-19",
+            "sessionId": "s-b5-19"
+          },
+          {
+            "callId": "c-b5-20",
+            "sessionId": "s-b5-20"
+          },
+          {
+            "callId": "c-b5-21",
+            "sessionId": "s-b5-21"
+          },
+          {
+            "callId": "c-b5-22",
+            "sessionId": "s-b5-22"
+          },
+          {
+            "callId": "c-b5-23",
+            "sessionId": "s-b5-23"
+          },
+          {
+            "callId": "c-b5-24",
+            "sessionId": "s-b5-24"
+          },
+          {
+            "callId": "c-b5-25",
+            "sessionId": "s-b5-25"
+          },
+          {
+            "callId": "c-b5-26",
+            "sessionId": "s-b5-26"
+          },
+          {
+            "callId": "c-b5-27",
+            "sessionId": "s-b5-27"
+          },
+          {
+            "callId": "c-b5-28",
+            "sessionId": "s-b5-28"
+          },
+          {
+            "callId": "c-b5-29",
+            "sessionId": "s-b5-29"
+          },
+          {
+            "callId": "c-b5-30",
+            "sessionId": "s-b5-30"
+          },
+          {
+            "callId": "c-b5-31",
+            "sessionId": "s-b5-31"
+          },
+          {
+            "callId": "c-b5-32",
+            "sessionId": "s-b5-32"
+          },
+          {
+            "callId": "c-b5-33",
+            "sessionId": "s-b5-33"
+          },
+          {
+            "callId": "c-b5-34",
+            "sessionId": "s-b5-34"
+          },
+          {
+            "callId": "c-b5-35",
+            "sessionId": "s-b5-35"
+          },
+          {
+            "callId": "c-b5-36",
+            "sessionId": "s-b5-36"
+          },
+          {
+            "callId": "c-b5-37",
+            "sessionId": "s-b5-37"
+          },
+          {
+            "callId": "c-b5-38",
+            "sessionId": "s-b5-38"
+          },
+          {
+            "callId": "c-b5-39",
+            "sessionId": "s-b5-39"
+          },
+          {
+            "callId": "c-b5-40",
+            "sessionId": "s-b5-40"
+          },
+          {
+            "callId": "c-b5-41",
+            "sessionId": "s-b5-41"
+          },
+          {
+            "callId": "c-b5-42",
+            "sessionId": "s-b5-42"
+          },
+          {
+            "callId": "c-b5-43",
+            "sessionId": "s-b5-43"
+          },
+          {
+            "callId": "c-b5-44",
+            "sessionId": "s-b5-44"
+          },
+          {
+            "callId": "c-b5-45",
+            "sessionId": "s-b5-45"
+          },
+          {
+            "callId": "c-b5-46",
+            "sessionId": "s-b5-46"
+          },
+          {
+            "callId": "c-b5-47",
+            "sessionId": "s-b5-47"
+          },
+          {
+            "callId": "c-b5-48",
+            "sessionId": "s-b5-48"
+          },
+          {
+            "callId": "c-b5-49",
+            "sessionId": "s-b5-49"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-05",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-b5-0",
+              "sessionId": "s-b5-0",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-1",
+              "sessionId": "s-b5-1",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-2",
+              "sessionId": "s-b5-2",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-3",
+              "sessionId": "s-b5-3",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-4",
+              "sessionId": "s-b5-4",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-5",
+              "sessionId": "s-b5-5",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-6",
+              "sessionId": "s-b5-6",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-7",
+              "sessionId": "s-b5-7",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-8",
+              "sessionId": "s-b5-8",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-9",
+              "sessionId": "s-b5-9",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-10",
+              "sessionId": "s-b5-10",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-11",
+              "sessionId": "s-b5-11",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-12",
+              "sessionId": "s-b5-12",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-13",
+              "sessionId": "s-b5-13",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-14",
+              "sessionId": "s-b5-14",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-15",
+              "sessionId": "s-b5-15",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-16",
+              "sessionId": "s-b5-16",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-17",
+              "sessionId": "s-b5-17",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-18",
+              "sessionId": "s-b5-18",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-19",
+              "sessionId": "s-b5-19",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-20",
+              "sessionId": "s-b5-20",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-21",
+              "sessionId": "s-b5-21",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-22",
+              "sessionId": "s-b5-22",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-23",
+              "sessionId": "s-b5-23",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-24",
+              "sessionId": "s-b5-24",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-25",
+              "sessionId": "s-b5-25",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-26",
+              "sessionId": "s-b5-26",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-27",
+              "sessionId": "s-b5-27",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-28",
+              "sessionId": "s-b5-28",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-29",
+              "sessionId": "s-b5-29",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-30",
+              "sessionId": "s-b5-30",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-31",
+              "sessionId": "s-b5-31",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-32",
+              "sessionId": "s-b5-32",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-33",
+              "sessionId": "s-b5-33",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-34",
+              "sessionId": "s-b5-34",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-35",
+              "sessionId": "s-b5-35",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-36",
+              "sessionId": "s-b5-36",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-37",
+              "sessionId": "s-b5-37",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-38",
+              "sessionId": "s-b5-38",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-39",
+              "sessionId": "s-b5-39",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-40",
+              "sessionId": "s-b5-40",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-41",
+              "sessionId": "s-b5-41",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-42",
+              "sessionId": "s-b5-42",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-43",
+              "sessionId": "s-b5-43",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-44",
+              "sessionId": "s-b5-44",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-45",
+              "sessionId": "s-b5-45",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-46",
+              "sessionId": "s-b5-46",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-47",
+              "sessionId": "s-b5-47",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-48",
+              "sessionId": "s-b5-48",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-b5-49",
+              "sessionId": "s-b5-49",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-05",
+          "ok": true
+        },
+        "events": [
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-0",
+              "sessionId": "s-b5-0",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-1",
+              "sessionId": "s-b5-1",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-2",
+              "sessionId": "s-b5-2",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-3",
+              "sessionId": "s-b5-3",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-4",
+              "sessionId": "s-b5-4",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-5",
+              "sessionId": "s-b5-5",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-6",
+              "sessionId": "s-b5-6",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-7",
+              "sessionId": "s-b5-7",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-8",
+              "sessionId": "s-b5-8",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-9",
+              "sessionId": "s-b5-9",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-10",
+              "sessionId": "s-b5-10",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-11",
+              "sessionId": "s-b5-11",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-12",
+              "sessionId": "s-b5-12",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-13",
+              "sessionId": "s-b5-13",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-14",
+              "sessionId": "s-b5-14",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-15",
+              "sessionId": "s-b5-15",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-16",
+              "sessionId": "s-b5-16",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-17",
+              "sessionId": "s-b5-17",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-18",
+              "sessionId": "s-b5-18",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-19",
+              "sessionId": "s-b5-19",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-20",
+              "sessionId": "s-b5-20",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-21",
+              "sessionId": "s-b5-21",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-22",
+              "sessionId": "s-b5-22",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-23",
+              "sessionId": "s-b5-23",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-24",
+              "sessionId": "s-b5-24",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-25",
+              "sessionId": "s-b5-25",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-26",
+              "sessionId": "s-b5-26",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-27",
+              "sessionId": "s-b5-27",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-28",
+              "sessionId": "s-b5-28",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-29",
+              "sessionId": "s-b5-29",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-30",
+              "sessionId": "s-b5-30",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-31",
+              "sessionId": "s-b5-31",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-32",
+              "sessionId": "s-b5-32",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-33",
+              "sessionId": "s-b5-33",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-34",
+              "sessionId": "s-b5-34",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-35",
+              "sessionId": "s-b5-35",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-36",
+              "sessionId": "s-b5-36",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-37",
+              "sessionId": "s-b5-37",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-38",
+              "sessionId": "s-b5-38",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-39",
+              "sessionId": "s-b5-39",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-40",
+              "sessionId": "s-b5-40",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-41",
+              "sessionId": "s-b5-41",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-42",
+              "sessionId": "s-b5-42",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-43",
+              "sessionId": "s-b5-43",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-44",
+              "sessionId": "s-b5-44",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-45",
+              "sessionId": "s-b5-45",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-46",
+              "sessionId": "s-b5-46",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-47",
+              "sessionId": "s-b5-47",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-48",
+              "sessionId": "s-b5-48",
+              "rang": true
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-b5-49",
+              "sessionId": "s-b5-49",
+              "rang": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "BS-06",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "缺 createdAt：形状不符，整批 bad_args，恰好一次；同批另一条有记录也不处理，不发事件",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "c-6",
+            "sessionId": "s-6"
+          },
+          {
+            "callId": "c-7",
+            "sessionId": "s-7"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-06",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-6",
+              "sessionId": "s-6"
+            },
+            {
+              "callId": "c-7",
+              "sessionId": "s-7",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-06",
+          "ok": false,
+          "error": "bad_args"
+        },
+        "events": []
+      }
+    },
+    {
+      "id": "BS-07",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "类型不符：createdAt 为字符串，整批 bad_args，恰好一次，不发事件",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "c-8",
+            "sessionId": "s-8"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-07",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-8",
+              "sessionId": "s-8",
+              "createdAt": "1761996400000"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-07",
+          "ok": false,
+          "error": "bad_args"
+        },
+        "events": []
+      }
+    },
+    {
+      "id": "BS-08",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "类型不符：callId 为数字，整批 bad_args，恰好一次，不发事件",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": []
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-08",
+        "args": {
+          "calls": [
+            {
+              "callId": 9,
+              "sessionId": "s-9",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-08",
+          "ok": false,
+          "error": "bad_args"
+        },
+        "events": []
+      }
+    },
+    {
+      "id": "BS-09",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "args 无 calls：args 形状不符，整批 bad_args，恰好一次，不发事件",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": []
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-09",
+        "args": {}
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-09",
+          "ok": false,
+          "error": "bad_args"
+        },
+        "events": []
+      }
+    },
+    {
+      "id": "BS-10",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "记录存在但超过保留期限（createdAt 早于 now 3 天以上）：rang:false",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "c-10",
+            "sessionId": "s-10"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-10",
+        "args": {
+          "calls": [
+            {
+              "callId": "c-10",
+              "sessionId": "s-10",
+              "createdAt": 1761654400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-10",
+          "ok": true
+        },
+        "events": [
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-10",
+              "sessionId": "s-10",
+              "rang": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "BS-11",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "空批次（0 条）：ack ok，不发事件",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": []
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-11",
+        "args": {
+          "calls": []
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-11",
+          "ok": true
+        },
+        "events": []
+      }
+    },
+    {
+      "id": "BS-12",
+      "group": "BeamioShell",
+      "action": "queryIncomingCallOutcome",
+      "title": "空串记录不参与匹配（§25.52EH.1）：壳中存在 callId、sessionId 同为空串的记录，条目为空串，回 rang:false；同批非空条目照常匹配",
+      "fixture": {
+        "nowMs": 1762000000000,
+        "frame": "main",
+        "origin": "allowed",
+        "ringRecords": [
+          {
+            "callId": "",
+            "sessionId": ""
+          },
+          {
+            "callId": "c-12",
+            "sessionId": "s-12"
+          }
+        ]
+      },
+      "request": {
+        "action": "queryIncomingCallOutcome",
+        "reqId": "bs-bs-12",
+        "args": {
+          "calls": [
+            {
+              "callId": "",
+              "sessionId": "",
+              "createdAt": 1761996400000
+            },
+            {
+              "callId": "c-12",
+              "sessionId": "s-12",
+              "createdAt": 1761996400000
+            }
+          ]
+        }
+      },
+      "expect": {
+        "ack": {
+          "type": "ack",
+          "action": "queryIncomingCallOutcome",
+          "reqId": "bs-bs-12",
+          "ok": true
+        },
+        "events": [
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "",
+              "sessionId": "",
+              "rang": false
+            }
+          },
+          {
+            "channel": "cashtreesandroid",
+            "payload": {
+              "action": "incomingCallOutcome",
+              "callId": "c-12",
+              "sessionId": "s-12",
+              "rang": true
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "counts": {
+    "cases": 12,
+    "queryIncomingCallOutcome": 12
+  },
+  "notCovered": [
+    "来源拒绝与 action 不在表中的用例：由 §25.52AA.11.3 的其它用例覆盖，本文件不含。",
+    "两端的实现：本文件给出共同期望，Android 与 iOS 须各自运行并回报。",
+    "rang 判定口径（§25.52EF.4）：尚待 Android 壳确认其实现与本口径一致。"
+  ]
+}

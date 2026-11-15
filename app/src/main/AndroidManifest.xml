@@ -2,9 +2,43 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ⭐ 添加网络权限（必须在 application 外）-->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission/CAMERA" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Chat composer voice notes / getUserMedia({ audio: true }) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Launcher icon badge via silent notification (PWA publishAppState) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- targetSdk 36 BAL blocks IncomingCallActivity under launcher; overlay glass
+         from phoneCall FGS is the reliable CallKit-style banner path. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- API 34+: phoneCall FGS posts CallStyle; microphone FGS after answer -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Incoming-call glass under launcher: AlarmManager.setAlarmClock BAL bypass (API 31+) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- API 34+ / 部分厂商：Foreground dispatch / ReaderMode 需在 manifest 声明，否则 onResume 内 NfcActivityManager 抛 SecurityException -->
+    <uses-permission android:name="android.permission.NFC" />
+    <!-- WebView QR / getUserMedia；无相机或麦克风设备仍可安装 -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.nfc"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -13,21 +47,212 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Beamio">
-
+        android:theme="@style/Theme.CaehTrees"
+        android:usesCleartextTraffic="true">
+        <!-- Website ↔ app Digital Asset Links (beamio.ca assetlinks.json + getInstalledRelatedApps). -->
+        <meta-data
+            android:name="asset_statements"
+            android:resource="@string/asset_statements" />
+        <!-- FQCN must match namespace com.beamio.app (Play package id: com.beamio.app). -->
         <activity
-            android:name=".MainActivity"
+            android:name="com.beamio.app.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.Beamio">
-
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.CaehTrees">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
+
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
+            <!-- Consumer deep link: beamio://open?… (package com.beamio.app — not SoftPOS). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="beamio" android:host="open" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="beamio" />
+            </intent-filter>
         </activity>
+        <activity
+            android:name="com.beamio.app.GeneralQRScannerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.CaehTrees" />
+        <!-- Native wallet key import (spec 25.25): opened only by the shell (SDK NativeImportHost launcher). -->
+        <activity
+            android:name="com.beamio.app.nativekey.NativeKeyImportActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.CaehTrees" />
+        <!-- QA: native recovery with a recovery code (PWA nativeRecoveryOpen). Opened only by the shell. -->
+        <activity
+            android:name="com.beamio.app.nativekey.NativeAccountCreateActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.CaehTrees" />
+        <activity
+            android:name="com.beamio.app.nativekey.NativeRecoveryActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.CaehTrees" />
 
+        <!--
+          Dedicated singleInstance task. Same-task translucent glass under a
+          backgrounded Beamio task never resumes on Samsung (app=null + Pending
+          Intents). Separate affinity + AppTask.moveToFront raises glass above
+          the launcher. Do not raise opaque Main before glass — Main covers it.
+        -->
+        <activity
+            android:name="com.beamio.app.IncomingCallActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:taskAffinity="com.beamio.app.incoming"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.CaehTrees.IncomingCallWindow" />
+
+        <!--
+          Native CallKit-style in-call page after Answer. Must show over lock
+          screen (parity with iOS BeamioInCallScreen); Answer from glass /
+          CallStyle / Telecom must not drop into a dead Main-only unlock.
+        -->
+        <activity
+            android:name="com.beamio.app.InCallActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.CaehTrees.InCall" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Unused ZXing default capture screen locks SENSOR_LANDSCAPE — remove for large-screen policy. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            tools:node="remove" />
+
+        <!-- FCM: offline chat badge (data-only; no message body) -->
+        <service
+            android:name="com.beamio.app.CashTreesFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <service
+            android:name="com.beamio.app.BeamioTelecomService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+        <service
+            android:name="com.beamio.app.BeamioCallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone|shortService" />
+        <!-- Keeps a chat send in progress alive after the user leaves the app (BeamioChatSendHold). -->
+        <service
+            android:name="com.beamio.app.BeamioChatSendHoldJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <receiver
+            android:name="com.beamio.app.IncomingCallActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.beamio.app.action.ANSWER_CALL" />
+                <action android:name="com.beamio.app.action.DECLINE_CALL" />
+                <action android:name="com.beamio.app.action.MUTE_CALL" />
+                <action android:name="com.beamio.app.action.HANGUP_CALL" />
+            </intent-filter>
+        </receiver>
     </application>
+
+    <queries>
+        <package android:name="io.metamask" />
+        <package android:name="org.toshi" />
+        <package android:name="com.coinbase.wallet" />
+        <package android:name="com.okinc.okex.gp" />
+        <package android:name="com.okinc.okex" />
+        <package android:name="com.okex.okex" />
+        <package android:name="com.okx.wallet" />
+        <package android:name="vip.mytokenpocket" />
+        <package android:name="app.phantom" />
+        <package android:name="com.wallet.crypto.trustapp" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="metamask" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="cbwallet" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="coinbase" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="base" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="okx" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="okex" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="tpdapp" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="tpoutside" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="phantom" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="trust" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="ethereum" />
+        </intent>
+    </queries>
 
 </manifest>

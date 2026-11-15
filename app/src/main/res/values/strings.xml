@@ -1,3 +1,88 @@
 <resources>
     <string name="app_name">Beamio</string>
+    <!-- Bidirectional Digital Asset Links for https://beamio.ca (getInstalledRelatedApps / App Links; PM R1637). -->
+    <string name="asset_statements" translatable="false">[{&#34;relation&#34;:[&#34;delegate_permission/common.handle_all_urls&#34;],&#34;target&#34;:{&#34;namespace&#34;:&#34;web&#34;,&#34;site&#34;:&#34;https://beamio.ca&#34;}}]</string>
+    <string name="incoming_call_body">Incoming voice call</string>
+    <string name="incoming_call_glass_subtitle">Beamio Audio</string>
+
+    <string name="incoming_call_decline">Decline</string>
+    <string name="incoming_call_mute">Mute</string>
+    <string name="incoming_call_answer">Answer</string>
+    <string name="incoming_call_slide_to_answer">Slide to answer</string>
+    <string name="incoming_call_muted_title">Muted</string>
+    <string name="incoming_call_muted_text">Waiting to time out</string>
+
+    <string name="in_call_minimize">Minimize</string>
+    <string name="in_call_mute">Mute</string>
+    <string name="in_call_unmute">Unmute</string>
+    <string name="in_call_speaker">Speaker</string>
+    <string name="in_call_audio">Speaker</string>
+    <string name="in_call_video">Video</string>
+    <string name="in_call_camera_denied">Camera access is off. Turn on Camera for Beamio in Settings to share video.</string>
+    <string name="in_call_camera_failed">Camera didn\'t start. Try again.</string>
+    <string name="in_call_end">End Call</string>
+    <string name="in_call_end_short">End</string>
+    <string name="in_call_calling">Calling…</string>
+    <string name="in_call_ringing">Ringing…</string>
+    <string name="in_call_peer_unreachable">Their phone may be restricting Beamio</string>
+    <string name="in_call_connecting">Connecting…</string>
+    <string name="in_call_reconnecting">Reconnecting…</string>
+    <string name="in_call_connection_lost">Call ended: connection lost</string>
+    <string name="in_call_busy">On another call</string>
+    <string name="in_call_unreachable">Unreachable</string>
+    <string name="in_call_return">Return to call</string>
+    <string name="in_call_fallback_title">Beamio call</string>
+    <string name="in_call_caller_avatar">Caller avatar</string>
+    <string name="in_call_peer_video">Remote video</string>
+    <string name="in_call_local_preview">Your camera preview</string>
+    <string name="in_call_show_controls">Show call controls</string>
+    <string name="in_call_hide_controls">Hide call controls</string>
+
+    <string name="overlay_access_title">Show calls full screen</string>
+    <string name="overlay_access_message">To show an incoming call full screen while you use another app, turn on \"Appear on top\" (also called \"Display over other apps\") for Beamio on the next screen.</string>
+    <string name="overlay_access_allow">Turn on</string>
+    <string name="overlay_access_later">Not now</string>
+    <!-- Native wallet key import (spec 25.25, 25.26.3). Title and button follow the PWA locked page
+         (native_key_required_*); result texts use the spec 25.25.5 keys (imp.err.* as imp_err_*); drafts pending P-IMP-COPY. -->
+    <string name="native_key_import_title">Import wallet</string>
+    <string name="native_key_import_body">This device has no wallet key for this account, so Beamio is locked. Enter the account\'s private key (64 hexadecimal characters) or its recovery phrase. It is saved only on this device and never goes to the page.</string>
+    <string name="native_key_import_mode_key">Private key</string>
+    <string name="native_key_import_mode_mnemonic">Recovery phrase</string>
+    <string name="native_key_import_hint_key">Private key</string>
+    <string name="native_key_import_hint_mnemonic">Recovery phrase (12, 15 or 24 words)</string>
+    <string name="native_key_import_button">Import wallet</string>
+    <string name="native_key_import_cancel">Cancel</string>
+    <string name="native_key_import_ok">Imported</string>
+    <string name="imp_err_format">The format is not correct.</string>
+    <string name="imp_err_range">This is not a valid private key.</string>
+    <string name="imp_err_mnemonic">This recovery phrase is not valid.</string>
+    <string name="imp_err_mismatch">This key does not belong to this account.</string>
+    <string name="imp_err_exists">This device already has a wallet key. Nothing was changed.</string>
+    <string name="imp_err_write">Could not save. Try again.</string>
+    <string name="imp_err_readback">Saved, but the check after saving failed. Nothing was kept. Try again.</string>
+    <string name="imp_err_not_supported">Import is not supported in this version of the app. Nothing was saved.</string>
+    <string name="native_recovery_title">Restore with recovery code</string>
+    <string name="native_recovery_body">Enter your recovery code. It stays on this device and is never shown to the web page.</string>
+    <string name="native_recovery_hint">Recovery code</string>
+    <string name="native_recovery_button">Restore</string>
+    <string name="native_recovery_ok">Restored.</string>
+    <string name="native_recovery_err_format">That does not look like a recovery code.</string>
+    <string name="native_recovery_err_not_found">No account was found for this recovery code.</string>
+    <string name="native_recovery_err_network">Network error. Try again.</string>
+    <string name="native_recovery_err_backoff">Too many attempts. Wait a moment and try again.</string>
+    <string name="native_recovery_err_other">Restore failed. Try again.</string>
+    <string name="native_recovery_tab_code">Recovery code</string>
+    <string name="native_recovery_tab_password">Account and password</string>
+    <string name="native_recovery_hint_account">Account name</string>
+    <string name="native_recovery_hint_password">Password</string>
+    <string name="native_recovery_err_bad_password">Wrong account name or password.</string>
+    <string name="native_recovery_err_legacy">This account uses an older record format and cannot be restored here yet.</string>
+    <string name="native_create_title">Create your wallet</string>
+    <string name="native_create_body">A new key will be created and kept on this device. It is never shown to the web page.</string>
+    <string name="native_create_button">Create</string>
+    <string name="native_create_working">Creating…</string>
+    <string name="native_create_ok">Created.</string>
+    <string name="native_create_err_exists">This device already has a wallet.</string>
+    <string name="native_create_err_save">Could not save the key on this device. Try again.</string>
+    <string name="native_create_err_other">Create did not finish. Try again.</string>
 </resources>

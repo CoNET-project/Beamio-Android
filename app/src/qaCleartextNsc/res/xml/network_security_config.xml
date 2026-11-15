@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- QA ONLY (-PqaCleartextNsc=true, debug): cleartext allowed like the release/store builds, which use the
+     manifest's usesCleartextTraffic="true" with no NSC. Lets the chat SDK reach node IPs over HTTP in QA (R551). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
