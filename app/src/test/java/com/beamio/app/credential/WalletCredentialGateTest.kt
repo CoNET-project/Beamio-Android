@@ -242,8 +242,18 @@ class WalletCredentialGateTest {
             return JSONObject(r.reply)
         }
         val okReply = ack(JSONObject().put("eoa", testEoa)).put("reqId", 8).toString()
-        // untrusted: not_trusted, the SDK is not called
-        for (v in Verdict.values().filter { it != Verdict.TRUSTED }) assertEquals("not_trusted", run(addrReq(), v, okReply).getString("error"))
+        // r3or §25.52Y.44 item 4: frame or origin mismatch -> origin_refused (even with a bad reqId, then reqId null);
+        // other untrusted verdicts -> not_trusted; the SDK is not called
+        for (v in listOf(Verdict.FRAME_REFUSED, Verdict.ORIGIN_REFUSED)) {
+            val o = run(addrReq(), v, okReply)
+            assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(8, o.getInt("reqId"))
+            assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
+            val bad = run(JSONObject().put("type", "walletEoaAddress").put("reqId", -1), v, okReply)
+            assertEquals("origin_refused", bad.getString("error")); assertTrue(bad.isNull("reqId"))
+        }
+        for (v in Verdict.values().filter { it != Verdict.TRUSTED && it != Verdict.FRAME_REFUSED && it != Verdict.ORIGIN_REFUSED }) {
+            assertEquals("not_trusted", run(addrReq(), v, okReply).getString("error"))
+        }
         assertEquals(0, calls)
         // malformed: refused before the SDK
         assertEquals("bad_request", run(addrReq("extra" to 1), Verdict.TRUSTED, okReply).getString("error"))

@@ -277,10 +277,13 @@ object WalletCredentialGate {
             logs += replyLine(command, ev, clock() - started, names) // log point 2
             return WindowResult(raw ?: ev.toString(), logs)
         }
-        if (rid == null) return done(refusal(null, BAD_REQUEST))
         return try {
             val v = verdict()
             logs += entryLine(command, rid, v) // log point 1
+            // r3or §25.52Y.44 item 4 (PM R1952, source first): on the window channel a frame or origin mismatch answers
+            // origin_refused exactly once (reqId echoed when valid, else null), before any other check.
+            if (v == Verdict.FRAME_REFUSED || v == Verdict.ORIGIN_REFUSED) return done(refusal(rid, SHELL_RECORD_ORIGIN_REFUSED))
+            if (rid == null) return done(refusal(null, BAD_REQUEST))
             when (val c = checkRequest(body, v)) {
                 is RequestCheck.Refuse -> done(refusal(c.reqId, c.error), names = c.fieldNames)
                 RequestCheck.Pass -> {
