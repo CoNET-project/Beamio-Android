@@ -485,6 +485,11 @@ tasks.configureEach {
 if (qaReleaseVariant && gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
     throw GradleException("debugqa is com.beamio.app.t168 only; -PqaReleaseVariant (t168r) cannot build it.")
 }
+// debugqa takes debug's QA code, manifest and NSC, but not the two optional debug add-ons (the 10.0.2.2 OTA stub NSC of
+// -PotaManifestUrl and the -PchatQaHooks hooks): asking for debugqa with either switch fails instead of silently differing.
+if ((otaLocalStub || chatQaHooks) && gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
+    throw GradleException("debugqa does not take -PotaManifestUrl or -PchatQaHooks (debug-only test add-ons); build debugqa without them.")
+}
 val verifyDebugqaNotInReleaseOrStore by tasks.registering {
     group = "verification"
     description = "Fail a release or store packaging run that also asks for a debugqa product"

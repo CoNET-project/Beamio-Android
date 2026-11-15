@@ -27,6 +27,16 @@ class DebugqaBuildTypeTest {
         assertTrue(g.contains("dependsOn(verifyDebugqaNotInReleaseOrStore)"))
     }
 
+    /** Reviewer on f1cac906: debugqa uses debug's code/manifest/NSC but refuses the two debug-only add-ons explicitly. */
+    @Test
+    fun debugqaRefusesTheDebugOnlyAddOns() {
+        assertTrue(g.contains("if ((otaLocalStub || chatQaHooks) && gradle.startParameter.taskNames.any { it.contains(\"debugqa\", ignoreCase = true) }) {"))
+        val ss = g.substringAfter("maybeCreate(\"debugqa\").let {").substringBefore("\n        }")
+        assertTrue(ss.contains("listOf(\"src/debug/java\", \"src/ota/java\")"))
+        assertTrue(ss.contains("it.manifest.srcFile(\"src/debug/AndroidManifest.xml\")"))
+        assertFalse(ss.contains("otaLocalStub")); assertFalse(ss.contains("qaHooks"))
+    }
+
     /** HD.3 item 1: no capability is declared by the shell (no shell constant, no QA switch). */
     @Test
     fun shellNeverDeclaresNativeKeys() {
