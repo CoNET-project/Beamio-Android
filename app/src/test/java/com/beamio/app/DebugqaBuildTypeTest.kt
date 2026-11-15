@@ -37,6 +37,16 @@ class DebugqaBuildTypeTest {
         assertFalse(ss.contains("otaLocalStub")); assertFalse(ss.contains("qaHooks"))
     }
 
+    /** PM R2102 (R2099 gap): the legacy sensitive bridge is off by default in every build type, debug and debugqa included. */
+    @Test
+    fun legacySensitiveBridgeIsOffByDefaultEverywhere() {
+        assertTrue(g.contains("val legacyDebug = legacySensitiveBridgeProp == \"true\""))
+        assertTrue(g.contains("val legacyRelease = legacySensitiveBridgeProp == \"true\""))
+        assertFalse(g.contains("legacySensitiveBridgeProp != \"false\""))
+        // this unit-test build was made without -PlegacySensitiveBridge
+        assertFalse(com.beamio.app.BuildConfig.LEGACY_SENSITIVE_BRIDGE)
+    }
+
     /** HD.3 item 1: no capability is declared by the shell (no shell constant, no QA switch). */
     @Test
     fun shellNeverDeclaresNativeKeys() {

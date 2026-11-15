@@ -50,10 +50,12 @@ val qaWriteGuard = providers.gradleProperty("qaWriteGuard").orNull == "true"
 val planN = providers.gradleProperty("planN").orNull != "false"
 // PM R766/R771/R789/R826: the sensitive CashTreesAndroid methods live on window.BeamioShell / window.BeamioChat
 // (spec §25.52AA.11). CashTreesJsBridgeLegacy re-exposes them on CashTreesAndroid for pages that have not switched.
-// Defaults (R826 d): debug true (QA transition); release false; store always false (no override). A release built with
-// -PlegacySensitiveBridge=true is a QA artifact (t168r legacy probe), never a release package (DR.3, R788).
+// Defaults: false in every build type (PM R2102, after R2099 found any iframe could reach chatModuleCommand /
+// chatModuleSignResponse through it); debug/debugqa and release can still opt in with -PlegacySensitiveBridge=true for a QA
+// probe; store is always false (no override). A build with it on is a QA artifact, never a release package (DR.3, R788).
+// The 0.53.x page prefers window.BeamioChat and only falls back to CashTreesAndroid when BeamioChat is missing.
 val legacySensitiveBridgeProp = providers.gradleProperty("legacySensitiveBridge").orNull
-val legacyDebug = legacySensitiveBridgeProp != "false"
+val legacyDebug = legacySensitiveBridgeProp == "true"
 val legacyRelease = legacySensitiveBridgeProp == "true"
 // QA native evidence page (PM R591, §25.37.4 A5): -PchatQaHooks compiles src/qaHooks into debug builds only and swaps in
 // src/qaHooksDebug/AndroidManifest.xml. Release and store never get it; scripts/verify-android-no-qa-hooks.sh checks the APKs.
@@ -193,7 +195,7 @@ android {
         debug {
             buildConfigField("boolean", "QA_WRITE_GUARD", qaWriteGuard.toString())
             buildConfigField("boolean", "PLAN_N", planN.toString())
-            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", legacyDebug.toString()) // R826 d: debug/QA may keep it
+            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", legacyDebug.toString()) // R2102: default false; opt-in QA probe only
             buildConfigField("boolean", "REMOTE_PWA_UPDATE", remotePwaUpdate.toString())
             buildConfigField("String", "OTA_MANIFEST_URL", "\"$otaManifestUrl\"")
             buildConfigField("String", "OTA_BUNDLE_BASE", "\"$otaBundleBase\"")
