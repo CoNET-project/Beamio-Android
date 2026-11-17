@@ -128,11 +128,12 @@ android {
     }
 
     defaultConfig {
-        applicationId = if (qaReleaseVariant) "com.beamio.app.t168r" else "com.beamio.app.t168" // QA ONLY: never the store id
+        // Consumer website APK and store id. The QA ids (t168, t168r) only for the QA variants (debugqa forced below, t168r above).
+        applicationId = if (qaReleaseVariant) "com.beamio.app.t168r" else "com.beamio.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 169
-        versionName = "1.0.163"
+        versionCode = 173
+        versionName = "1.0.165"
 
         // t168r (AH.6 item 3): a plain framework Instrumentation, since the minified release app lacks androidx.tracing.
         testInstrumentationRunner = if (qaReleaseVariant) "com.beamio.app.ah6.Ah6BridgeInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"

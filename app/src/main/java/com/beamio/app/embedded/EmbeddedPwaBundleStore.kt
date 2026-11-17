@@ -134,8 +134,11 @@ open class EmbeddedPwaBundleStore internal constructor(
                     bundledVersion != null &&
                     activeVersion == bundledVersion &&
                     contentChanged
+            // An active bundle whose version cannot be read (update.json missing or corrupt) is reinstalled from the
+            // embedded ZIP, so its version is readable again. An unknown version is never treated as 0.0.0.
+            val activeVersionUnknown = activeIsValid && activeVersion == null
             val shouldInstallBundled =
-                !activeIsValid || !activeUsesEmbeddedPaths || versionNewer || sameVersionNewBytes
+                !activeIsValid || !activeUsesEmbeddedPaths || activeVersionUnknown || versionNewer || sameVersionNewBytes
             Log.i(
                 TAG,
                 "bootstrap active=$activeVersion bundled=$bundledVersion " +
@@ -280,7 +283,14 @@ open class EmbeddedPwaBundleStore internal constructor(
         }
         val stagedVersion = readUpdateInfo(stagingDir)?.ver ?: return false
         val activeVersion = readUpdateInfo(activeDir)?.ver
-        if (activeVersion != null && !isSemverNewer(activeVersion, stagedVersion)) {
+        if (activeVersion == null) {
+            // Unknown active version: never promote over it. The bootstrap repairs the active bundle instead.
+            Log.w(TAG, "bootstrap: active version unreadable; discarding staged bundle (not promoted)")
+            stagingDir.deleteRecursively()
+            pendingVersion = null
+            return false
+        }
+        if (!isSemverNewer(activeVersion, stagedVersion)) {
             return false
         }
         if (!replaceActiveWithDirectoryLocked(stagingDir)) return false
@@ -288,7 +298,11 @@ open class EmbeddedPwaBundleStore internal constructor(
         return true
     }
 
-    fun activeVersion(): String = readUpdateInfo(activeDir)?.ver ?: "0.0.0"
+    /**
+     * Version of the active bundle, or null when it cannot be read (update.json missing, truncated or corrupt).
+     * An unreadable version is unknown, never "0.0.0": callers must not compare or display a substitute.
+     */
+    fun activeVersion(): String? = readUpdateInfo(activeDir)?.ver
 
     /**
      * Spec r3oj §25.52Y.38 item 2 (h) (PM R1908, R1920): a downloaded bundle is staged only when every byte of [zipFile]
@@ -350,6 +364,22 @@ open class EmbeddedPwaBundleStore internal constructor(
                 stagingDir.deleteRecursively()
                 pendingVersion = null
                 throw webBuildError("Staged bundle")
+            }
+            // Only upgrades (PM 2026-11-17, review 76706f6d): a staged bundle that is not strictly newer than the active one
+            // is discarded, never promoted. A downgrade must not reach the page through the bridge.
+            val stagedVersion = readUpdateInfo(stagingDir)?.ver ?: throw IllegalStateException("Staged bundle has no version")
+            // An unknown active version refuses the promotion (the staged bundle is discarded). A broken active is repaired
+            // by the bootstrap, which reinstalls the embedded ZIP; it is never replaced by a staged bundle of unknown age.
+            val activeVersion = readUpdateInfo(activeDir)?.ver
+            if (activeVersion == null) {
+                stagingDir.deleteRecursively()
+                pendingVersion = null
+                throw IllegalStateException("active_version_unknown")
+            }
+            if (!isSemverNewer(activeVersion, stagedVersion)) {
+                stagingDir.deleteRecursively()
+                pendingVersion = null
+                throw IllegalStateException("staged_not_newer")
             }
             if (!replaceActiveWithDirectoryLocked(stagingDir)) {
                 throw IllegalStateException("Failed to promote staged PWA update")

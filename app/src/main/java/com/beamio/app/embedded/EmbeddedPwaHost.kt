@@ -78,7 +78,8 @@ class EmbeddedPwaHost(context: Context) {
     }
 
     fun injectVersionGlobals(webView: WebView) {
-        val current = escapeJs(bundleStore.activeVersion())
+        // Unknown active version is published as "" (not a version), never as 0.0.0.
+        val current = escapeJs(bundleStore.activeVersion() ?: "")
         val pending = escapeJs(bundleStore.pendingUpdateVersion() ?: "")
         val js =
             "(function(){try{" +

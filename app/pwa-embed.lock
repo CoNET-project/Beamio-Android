@@ -1,8 +1,7 @@
-# Written by scripts/syncEmbeddedPwaZipToNativeShells.sh at 2026-11-15T16:59:58Z. Do not edit by hand.
-zip_sha256=a9abb9bade8b9e757d316215e939f189bb0b1d772935ea718197b95081e4aad4
-zip_ver=0.53.1
-classification=qa-candidate
-qa_manifest=QA-MANIFEST-shell-shared-0.53.1-ff3aedd.json
-qa_manifest_sha256=92fd07ea7f1fd3b0f6710f37c9ec0c599f6e6c77509e9c9e75cc422ed0a6e836
-qa_ver=0.53.1
-qa_zip_sha256=a9abb9bade8b9e757d316215e939f189bb0b1d772935ea718197b95081e4aad4
+# Written by scripts/syncEmbeddedPwaZipToNativeShells.sh at 2026-11-17T20:42:38Z. Do not edit by hand.
+zip_sha256=60746b1edbcf9ea680085ffd1ca67e7e484e4febae57f8ad1a61b77b2b39694e
+zip_ver=0.52.935
+classification=approved
+approved_ver=0.52.935
+approved_sha256=60746b1edbcf9ea680085ffd1ca67e7e484e4febae57f8ad1a61b77b2b39694e
+approval_record=project-owner approval 2026-11-17, PM record sha256:3704a8bc735ba74f3129c9da68c1905d530f22358ae204e7a74c48ef04919869

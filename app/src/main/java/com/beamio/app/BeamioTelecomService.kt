@@ -3101,20 +3101,14 @@ class BeamioTelecomService : ConnectionService() {
         }
 
         private fun fetchBeamioTag(address: String): String? {
-            val encoded = URLEncoder.encode(address, Charsets.UTF_8.name())
-            val connection = (URL(
-                "${BeamioWebHosts.CANONICAL_ORIGIN}/api/search-users?keyward=$encoded",
-            ).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 4000
-                readTimeout = 4000
-                instanceFollowRedirects = true
-            }
+            // search-users goes to beamio.ca only, with a single checked redirect (SearchUsersLookup); never a foreign host.
             return try {
-                if (connection.responseCode !in 200..299) {
-                    Log.w(TAG, "Caller tag HTTP ${connection.responseCode}")
+                // Incoming-call path is latency-sensitive: keep the original 4 s / 4 s timeouts (PM 2026-11-17).
+                val body = com.beamio.app.search.SearchUsersLookup.fetchBody(address, connectTimeoutMs = 4000, readTimeoutMs = 4000)
+                if (body == null) {
+                    Log.w(TAG, "Caller tag lookup unavailable")
                     null
                 } else {
-                    val body = connection.inputStream.bufferedReader().use { it.readText() }
                     val results = JSONObject(body).optJSONArray("results") ?: return null
                     val want = address.lowercase()
                     var tag: String? = null
@@ -3131,8 +3125,6 @@ class BeamioTelecomService : ConnectionService() {
             } catch (error: Exception) {
                 Log.w(TAG, "Caller tag lookup failed ${error.javaClass.simpleName}")
                 null
-            } finally {
-                connection.disconnect()
             }
         }
 

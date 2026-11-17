@@ -27,6 +27,7 @@ object BeamioNativeChatHooks {
     private val installed = AtomicBoolean(false)
 
     fun install(context: Context) {
+        com.beamio.app.net.LegacyBeamioHostGuard.install()
         if (!installed.compareAndSet(false, true)) return
         val app = context.applicationContext
         BeamioConetChatModule.keepListenWhile = { BeamioTelecomService.isCallInProgress() }

@@ -413,7 +413,7 @@ class MainActivity : ComponentActivity() {
                 "replaying pending OTA event attempt=$embeddedPwaUpdateReplayAttempt pending=$pending",
             )
             dispatchEmbeddedPwaUpdateAvailable(
-                embeddedPwaHost.bundleStore.activeVersion(),
+                embeddedPwaHost.bundleStore.activeVersion() ?: "",
                 pending,
             )
             pendingSystemCallHandler.postDelayed(
@@ -1555,7 +1555,8 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun getEmbeddedPwaVersion(): String {
             if (!useEmbeddedPwa || !::embeddedPwaHost.isInitialized) return ""
-            return embeddedPwaHost.bundleStore.activeVersion()
+            // An unreadable active version is reported as "" (unknown), never as a version.
+            return embeddedPwaHost.bundleStore.activeVersion() ?: ""
         }
 
         /** Embedded PWA OTA — mirrors iOS `CashTreesIOS.getEmbeddedPwaPendingVersion`. */
@@ -1881,6 +1882,8 @@ class MainActivity : ComponentActivity() {
                 Log.i(TAG, "init apiBaseUrl set to the live domain")
             }
         }
+        // The API base is pinned to beamio.ca before the SDK sees an init (PM 2026-11-17; see ChatApiBase).
+        com.beamio.app.chatapi.ChatApiBase.pin(body)
         BeamioChatSendHold.onCommand(applicationContext, body)
         BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
     }
@@ -2055,6 +2058,8 @@ class MainActivity : ComponentActivity() {
             val uri = Uri.parse(trimmed)
             val scheme = uri.scheme?.lowercase() ?: return
             if (scheme !in ALLOWED_EXTERNAL_URL_SCHEMES) return
+            // PM 2026-11-17 (r8): the openURL bridge never hands a legacy-host link to an external app (refused, logged).
+            if (com.beamio.app.net.LegacyBeamioHostGuard.refuseExternal(scheme, uri.host, uri.path)) return
             // NFC card links are deprecated (PM R1664/R1703): a SUN URL from the bridge never opens externally.
             if ((scheme == "http" || scheme == "https") && isBlockedSunUri(uri)) return
             // go.cb-w.com: open Coinbase Wallet APP with the full URI when possible
@@ -2276,14 +2281,25 @@ class MainActivity : ComponentActivity() {
         return false
     }
 
+    /** PM 2026-11-17 (r9): every external launch from this Activity passes here; a legacy-host intent (data or browser fallback) is refused. */
+    private fun refuseLegacyIntent(intent: Intent): Boolean =
+        com.beamio.app.net.LegacyBeamioHostGuard.refuseIntent(
+            intent.data?.scheme,
+            intent.data?.host,
+            intent.data?.path,
+            intent.getStringExtra("browser_fallback_url"),
+        )
+
     override fun startActivity(intent: Intent) {
         if (isSunExternalIntent(intent)) return
+        if (refuseLegacyIntent(intent)) return
         if (tryKeepInAppBrowserExternalIntent(intent)) return
         super.startActivity(intent)
     }
 
     override fun startActivity(intent: Intent, options: Bundle?) {
         if (isSunExternalIntent(intent)) return
+        if (refuseLegacyIntent(intent)) return
         if (tryKeepInAppBrowserExternalIntent(intent)) return
         super.startActivity(intent, options)
     }
@@ -2391,6 +2407,14 @@ class MainActivity : ComponentActivity() {
                         "inAppBrowser: intent pkg=$pkg dataHost=${dataUri?.host} " +
                             "fallbackHost=${runCatching { Uri.parse(fallback).host }.getOrNull()}",
                     )
+                    // PM 2026-11-17 (r8, N8): an intent whose data or browser fallback is a legacy host is refused, not launched.
+                    val fbHost = runCatching { Uri.parse(fallback).host }.getOrNull()
+                    if (
+                        com.beamio.app.net.LegacyBeamioHostGuard.refuseExternal("https", dataUri?.host, dataUri?.path) ||
+                        com.beamio.app.net.LegacyBeamioHostGuard.refuseExternal("https", fbHost, runCatching { Uri.parse(fallback).path }.getOrNull())
+                    ) {
+                        return true
+                    }
                     // Never hand Coinbase / browser-package HTTPS to Chrome — keep checkout in shell.
                     if (preferLoadHttpsInInAppWebView(dataUri, pkg)) {
                         Log.i(TAG, "inAppBrowser: keep intent https in WebView host=${dataUri?.host} pkg=$pkg")
@@ -2486,6 +2510,7 @@ class MainActivity : ComponentActivity() {
                     if (!launched) openPlayStoreForPackage("org.toshi")
                 }
                 else -> {
+                    if (com.beamio.app.net.LegacyBeamioHostGuard.refuseExternal(scheme, uri.host, uri.path)) return true
                     if (scheme in ALLOWED_EXTERNAL_URL_SCHEMES) {
                         val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         if (intent.resolveActivity(packageManager) != null) {
@@ -2616,14 +2641,17 @@ class MainActivity : ComponentActivity() {
             settings.displayZoomControls = false
             settings.mediaPlaybackRequiresUserGesture = false
             webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? =
-                    sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, "browser")
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
+                    legacyHostBlockedResponse(request)?.let { return it }
+                    return sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, "browser")
+                }
 
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
                     val next = request?.url ?: return false
+                    if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(next.host, next.path, false)) return true
                     Log.i(
                         TAG,
                         "inAppBrowser: override scheme=${next.scheme} host=${next.host} " +
@@ -2739,9 +2767,20 @@ class MainActivity : ComponentActivity() {
                         settings.javaScriptCanOpenWindowsAutomatically = false
                         settings.setSupportMultipleWindows(false)
                         webViewClient = object : WebViewClient() {
+                            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
+                                val u = request?.url ?: return null
+                                // PM 2026-11-17: WebView network ignores the Java ProxySelector, so the legacy host is refused here.
+                                if (com.beamio.app.net.LegacyBeamioHostGuard.isLegacyHost(u.host)) {
+                                    com.beamio.app.net.LegacyBeamioHostGuard.logSink(com.beamio.app.net.LegacyBeamioHostGuard.logLine(u.host, u.path))
+                                    return com.beamio.app.net.LegacyBeamioHostGuard.blockedResponse()
+                                }
+                                return null
+                            }
+
                             private fun routeToHost(next: Uri?): Boolean {
                                 if (next == null) return true
                                 Log.i(TAG, "inAppBrowser: popup→host scheme=${next.scheme} host=${next.host}")
+                                if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(next.host, next.path, false)) return true
                                 if (isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
                                 if (isCoinbaseWalletTrampolineHost(next.host)) {
                                     launchCoinbaseWalletAppOrStore()
@@ -3230,7 +3269,7 @@ class MainActivity : ComponentActivity() {
         try {
             embeddedPwaHost.bundleStore.promoteStagingToActive()
             embeddedPwaHost.rebuildAssetLoader()
-            val ver = embeddedPwaHost.bundleStore.activeVersion()
+            val ver = embeddedPwaHost.bundleStore.activeVersion() ?: ""
             embeddedPwaHost.injectVersionGlobals(webView)
             webView.loadUrl(EmbeddedPwaConstants.entryUrl, HOME_DOCUMENT_REQUEST_HEADERS)
             dispatchAndroidBridgeJsonToWeb(
@@ -3555,6 +3594,14 @@ class MainActivity : ComponentActivity() {
      * locally with an empty 204, so it opens nothing and never reaches the network or the system browser (PM R1664).
      * Covers loadUrl as well as navigations.
      */
+    /** PM 2026-11-17: a main or sub request to the legacy parking host gets a 403 with no body (never forwarded). */
+    private fun legacyHostBlockedResponse(request: WebResourceRequest): android.webkit.WebResourceResponse? {
+        val u = request.url ?: return null
+        if (!com.beamio.app.net.LegacyBeamioHostGuard.isLegacyHost(u.host)) return null
+        com.beamio.app.net.LegacyBeamioHostGuard.logSink(com.beamio.app.net.LegacyBeamioHostGuard.logLine(u.host, u.path))
+        return com.beamio.app.net.LegacyBeamioHostGuard.blockedResponse()
+    }
+
     private fun sunBlockedMainFrameResponse(request: WebResourceRequest): android.webkit.WebResourceResponse? {
         if (!request.isForMainFrame) return null
         val u = request.url ?: return null
@@ -3596,6 +3643,11 @@ class MainActivity : ComponentActivity() {
                     if (BuildConfig.DEBUG && u.host != "appassets.androidplatform.net") {
                         android.util.Log.i("BeamioQaNet", "req ${request.method} ${u.scheme}://${u.host}${u.path ?: ""}")
                     }
+                    // PM 2026-11-17: no page request to the legacy parking host beamio.app (its own local asset mapping still applies).
+                    if (host.mapBeamioAppUrlToLocal(u) == null && com.beamio.app.net.LegacyBeamioHostGuard.isLegacyHost(u.host)) {
+                        com.beamio.app.net.LegacyBeamioHostGuard.logSink(com.beamio.app.net.LegacyBeamioHostGuard.logLine(u.host, u.path))
+                        return com.beamio.app.net.LegacyBeamioHostGuard.blockedResponse()
+                    }
                     if (host.shouldBypassEmbeddedAssetLoader(u)) {
                         return null
                     }
@@ -3612,6 +3664,8 @@ class MainActivity : ComponentActivity() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val u = request.url ?: return false
                     if (shouldBlockBeamioNdefTopLevelNavigation(u, request.isForMainFrame)) return true
+                    // PM 2026-11-17: navigation to the legacy parking host is cancelled (not loaded, not handed to a browser).
+                    if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(u.host, u.path, host.mapBeamioAppUrlToLocal(u) != null)) return true
                     if (request.isForMainFrame) {
                         host.mapBeamioAppUrlToLocal(u)?.let { local ->
                             view.loadUrl(local.toString())
@@ -3627,6 +3681,7 @@ class MainActivity : ComponentActivity() {
                     if (url.isNullOrEmpty()) return false
                     val u = Uri.parse(url)
                     if (shouldBlockBeamioNdefTopLevelNavigation(u, true)) return true
+                    if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(u.host, u.path, host.mapBeamioAppUrlToLocal(u) != null)) return true
                     host.mapBeamioAppUrlToLocal(u)?.let { local ->
                         view?.loadUrl(local.toString())
                         return true
@@ -3708,11 +3763,14 @@ class MainActivity : ComponentActivity() {
     private fun createRemoteWebView(jsBridge: CashTreesJsBridge, startUrl: String): WebView {
         return createBaseWebView(jsBridge).apply {
             webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? =
-                    sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, "remote")
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
+                    legacyHostBlockedResponse(request)?.let { return it }
+                    return sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, "remote")
+                }
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val u = request.url ?: return false
+                    if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(u.host, u.path, false)) return true
                     return shouldBlockBeamioNdefTopLevelNavigation(u, request.isForMainFrame)
                 }
 

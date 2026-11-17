@@ -75,14 +75,19 @@ class EmbeddedPwaUpdateDaemon(
         }
         if (!checkInFlight.compareAndSet(false, true)) return
         try {
-            Log.i(TAG, "OTA check begin active=${bundleStore.activeVersion()} pending=${bundleStore.pendingUpdateVersion() ?: ""}")
+            val current = bundleStore.activeVersion()
+            Log.i(TAG, "OTA check begin active=${current ?: "unknown"} pending=${bundleStore.pendingUpdateVersion() ?: ""}")
+            // Unknown active version: skip this round (no fetch, no download, no staging, no prompt); the next interval retries.
+            if (current == null) {
+                Log.w(TAG, "OTA check skipped: active version unreadable")
+                return
+            }
             val remote = fetchRemoteUpdateInfo() ?: run {
                 Log.w(TAG, "OTA manifest unavailable")
                 return
             }
-            val current = bundleStore.activeVersion()
             Log.i(TAG, "OTA manifest ver=${remote.ver} filename=${remote.filename} active=$current")
-            if (!EmbeddedPwaBundleStore.isSemverNewer(current, remote.ver)) {
+            if (decideOtaCheck(current, remote.ver) == OtaCheckDecision.NO_NEWER) {
                 Log.i(TAG, "OTA no newer version")
                 return
             }

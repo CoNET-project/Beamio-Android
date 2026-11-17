@@ -1,8 +1,10 @@
 # Chat SDK pin (PM R2079). The build resolves network.conet:chat:<chat_sdk_version> and fails unless that AAR's
 # SHA-256 equals chat_sdk_aar_sha256. The local maven directory stays a build parameter (-PchatSdkLocalRepo), never here.
-# chat_sdk_qa=true: a QA-only AAR (wallet.credential.v1 declared); packaging a store APK/AAB with it fails.
-chat_sdk_version=0.2.19-r1841qa
-chat_sdk_aar_sha256=8b99ae5beb1da11d449356d0a472247e75473952b4b31f245657fbe856c81aef
-chat_sdk_source_commit=6d88cca6df28c122335348cc7c3e307e3f3390b2
-chat_sdk_code_commit=16c7b5f6a25e2f38b3a84b55f32f7661be0a2fe4
-chat_sdk_qa=true
+# chat_sdk_qa=false: formal public AAR. DECIDED 2026-11-17 (PM, on the SDK evaluation): 0.2.6, publish commit 3a8e601.
+# Maven: network.conet:chat:0.2.6, source repo https://github.com/CoNET-project/chat-sdk-android, publish commit 3a8e601.
+# Replaces the 0.2.23 proposal (fa6c2e9) by a new commit; 0.2.23 is not used (its init and provisionIdentity refuse key material).
+chat_sdk_version=0.2.8
+chat_sdk_aar_sha256=918b204b592c89bba8931d6b93479b876d8a4497a0632ccc016aa74d343281ba
+chat_sdk_source_commit=3eb70d5f8f5529407dde30c6d8c672f4d1ebdee4
+chat_sdk_code_commit=3eb70d5f8f5529407dde30c6d8c672f4d1ebdee4
+chat_sdk_qa=false

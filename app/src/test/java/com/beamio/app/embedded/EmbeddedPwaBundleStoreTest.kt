@@ -457,6 +457,35 @@ class EmbeddedPwaBundleStoreTest {
         println("EVIDENCE S8-replace zipSha256=${sha256(bundledZip!!)} activeExists=${store.activeDir.exists()}")
     }
 
+    @Test
+    fun stagedNotNewerThanActiveIsDiscardedAndActiveIsUnchanged() {
+        for (stagedVer in listOf("0.52.932", "0.52.931")) {
+            root.deleteRecursively()
+            root.mkdirs()
+            writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.932")
+            val store = newStore()
+            writeBundle(store.stagingDir, assetPrefix = "", version = stagedVer)
+
+            assertThrows(IllegalStateException::class.java) { store.promoteStagingToActive() }
+
+            assertEquals("0.52.932", store.activeVersion())
+            assertFalse(stagedVer, store.stagingDir.exists())
+            assertNull(store.pendingUpdateVersion())
+        }
+    }
+
+    @Test
+    fun stagedStrictlyNewerThanActiveIsPromoted() {
+        writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.932")
+        val store = newStore()
+        writeBundle(store.stagingDir, assetPrefix = "", version = "0.52.933")
+
+        store.promoteStagingToActive()
+
+        assertEquals("0.52.933", store.activeVersion())
+        assertActiveIsEmbedded(store)
+    }
+
     // helpers
 
     // ---------- PM R1574: consumer black screen (embedded ZIP read failure with a valid active, missing JS) ----------

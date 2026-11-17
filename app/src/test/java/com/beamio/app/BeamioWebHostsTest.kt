@@ -18,7 +18,8 @@ class BeamioWebHostsTest {
     }
 
     private fun mainCode(): List<String> =
-        File("src/main/java/com/beamio/app").walkTopDown().filter { it.isFile && it.extension == "kt" && it.name != "BeamioWebHosts.kt" && it.name != "BeamioNfcSunBlock.kt" }
+        File("src/main/java/com/beamio/app").walkTopDown().filter { it.isFile && it.extension == "kt" && it.name != "BeamioWebHosts.kt" && it.name != "BeamioNfcSunBlock.kt" &&
+            it.name != "LegacyBeamioHostGuard.kt" /* the one place that recognises the legacy host (PM 2026-11-17) */ }
             .flatMap { f -> f.readLines().mapIndexed { i, l -> "${f.name}:${i + 1}: $l" } }
             .filterNot { it.substringAfter(": ").trimStart().let { s -> s.startsWith("*") || s.startsWith("//") || s.startsWith("/*") } }
             .toList()
@@ -32,7 +33,7 @@ class BeamioWebHostsTest {
         assertTrue("host checks outside BeamioWebHosts or wildcard: $badCheck", badCheck.isEmpty())
         for (f in listOf("BeamioTelecomService.kt", "BeamioVoiceOfferIdentity.kt")) {
             val s = File("src/main/java/com/beamio/app/$f").readText()
-            assertTrue("$f search-users on beamio.ca", s.contains("\${BeamioWebHosts.CANONICAL_ORIGIN}/api/search-users"))
+            assertTrue("$f search-users through SearchUsersLookup (beamio.ca only)", s.contains("SearchUsersLookup.fetchBody("))
         }
         assertTrue(File("src/main/java/com/beamio/app/embedded/EmbeddedPwaConstants.kt").readText().contains("REMOTE_FALLBACK_URL = \"https://beamio.ca/app/\""))
         for (f in listOf("src/ota/java/com/beamio/app/embedded/EmbeddedPwaOtaConstants.kt", "build.gradle.kts")) {

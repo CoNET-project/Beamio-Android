@@ -30,6 +30,7 @@ class BeamioCallForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        com.beamio.app.net.LegacyBeamioHostGuard.install()
         instance = this
     }
 

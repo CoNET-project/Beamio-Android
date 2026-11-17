@@ -338,18 +338,9 @@ object BeamioVoiceOfferIdentity {
     fun fetchExactTag(address: String): String? {
         val trimmed = address.trim()
         if (!trimmed.matches(Regex("^0x[0-9a-fA-F]{40}$"))) return null
-        var conn: HttpURLConnection? = null
+        // The search-users request goes to beamio.ca only, with a single checked redirect (SearchUsersLookup).
         return try {
-            val url = URL(
-                "${BeamioWebHosts.CANONICAL_ORIGIN}/api/search-users?keyward=${java.net.URLEncoder.encode(trimmed, "UTF-8")}",
-            )
-            conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 12_000
-            }
-            if (conn.responseCode !in 200..299) return null
-            val text = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
+            val text = com.beamio.app.search.SearchUsersLookup.fetchBody(trimmed) ?: return null
             val json = JSONObject(text)
             val results = json.optJSONArray("results") ?: return null
             val lower = trimmed.lowercase()
@@ -364,8 +355,6 @@ object BeamioVoiceOfferIdentity {
             null
         } catch (_: Exception) {
             null
-        } finally {
-            conn?.disconnect()
         }
     }
 
