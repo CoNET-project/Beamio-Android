@@ -1,8 +1,8 @@
 # Pinned SHA-256 of the shared PWA gate scripts used by app/build.gradle.kts (verifyPwaGatePins).
-# Shared scripts = byte-for-byte copies of the reviewed shared gate scripts (the sync script carries the delegated manifest pin for the 0.53.45 manifest).
+# Shared scripts = byte-for-byte copies of the reviewed shared gate scripts (the sync script carries the delegated manifest pin for the 0.53.46 manifest).
 # android-gate-decision.sh is the Android-side caller decision (this repository). A mismatch refuses the build.
 407b6dd922f0fd265d936215457d1daed24f7e5ca8b2b9f21e86b05971100390  verify-shell-pwa-version.sh
-94d91c3eeae6f5d64aea898f00f85299fad57a863ca3965ee6fdca3cb62d839a  syncEmbeddedPwaZipToNativeShells.sh
+a5416ba8b19541d8f22c1d05c5e7af52592176ea7bcfaa73a9cd7a42722a1c09  syncEmbeddedPwaZipToNativeShells.sh
 c71d1d9735ef79ed7a6f2e59c4d0d712a762d26afd4a1066eac1bd747f00e410  verify-android-pwa-embed-lock.sh
 90305faba1d5317d54dbb49ac61962cbb185e907a4332974012c60f05e413911  verify-android-single-zip.sh
 26a43f7f19c3557bb673215815ffdf2a905aed70db2a2c560b4fe5e8c555b270  verify-delegated-freeze.py
