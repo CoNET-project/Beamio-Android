@@ -12,8 +12,12 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.beamio.app.BuildConfig
 import android.os.SystemClock
+import com.beamio.app.BridgeReqId
+import com.beamio.app.ReqCorrelation
+import com.beamio.app.credential.PageSyncRoute
 import com.beamio.app.credential.ShellCredentialTrust
 import com.beamio.app.credential.WalletCredentialGate
+import network.conet.chat.BeamioConetChatModule
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -34,26 +38,59 @@ object ShellRecordChannel {
     const val ORIGIN = "https://appassets.androidplatform.net"
     private const val TAG = "BeamioShellRecord"
 
-    /** PM R675 / spec r3cx §25.52AZ.4: release builds inject the channel; the switch is PLAN_N only. */
+    /** / spec r3cx §25.52AZ.4: release builds inject the channel; the switch is PLAN_N only. */
     val enabled: Boolean = BuildConfig.PLAN_N
 
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * Frozen passcode protocol v1 §一第 4 条: the last trusted reply proxy of this window channel. Set only after a page-sync
+     * request passes the trusted verdict; cleared when the channel is rebuilt ([attach]); empty means events are dropped.
+     */
+    private val eventExit = com.beamio.app.credential.TrustedEventExit<JavaScriptReplyProxy>()
+
+    /**
+     * Top-level navigation started (MainActivity onPageStarted). A page that is not the trusted origin drops the proxy, so no
+     * passcode event is delivered to a remote page (protocol v1 §一第 4 条). The trusted origin keeps it until the channel is rebuilt.
+     */
+    fun onTopLevelPageStarted(url: String?) {
+        val trusted = com.beamio.app.ChatOriginGate.originOf(url) == com.beamio.app.ChatOriginGate.TRUSTED
+        eventExit.onMainFrameNavigation(trusted)
+    }
+
+    /**
+     * Native-to-page event through the trusted reply proxy. With no proxy the event is dropped and only the local code
+     * `no_event_target` is logged (it is never sent to the page). Returns the diagnostic code, or null when delivered.
+     */
+    fun emitEvent(event: org.json.JSONObject): String? {
+        val text = com.beamio.app.credential.chatModuleEventEnvelope(event).toString()
+        val code = eventExit.deliver(text) { p, s -> main.post { runCatching { p.postMessage(s) } } }
+        if (code != null) log("event dropped code=$code type=${event.optString("type")}")
+        return code
+    }
     val state = ShellRecordState()
 
     fun log(s: String) = Log.i(TAG, s.take(200))
 
     /**
-     * Call before the first WebView is created. R389: the page record (store and bridge) belongs to the Android SDK;
+ * Call before the first WebView is created.: the page record (store and bridge) belongs to the Android SDK;
      * the shell only copies P, reads the legacy PGP and hands it to the SDK's run(source). The shell-side store, bridge
      * and cipher stay in this package as local reference code for the SDK and are not wired.
      */
+    /**
+     * The only source the shell may read for the legacy P record: the OLD origin directory (migration only). The current origin
+     * (https_appassets…) is the PWA's own IndexedDB; native never reads it (v247 §266.1, legacy-pwa-origin-migration.v1 LPO-01).
+     */
+    fun legacyOriginIdbDir(dataDir: File): File =
+        File(dataDir, "app_webview/Default/IndexedDB/" + LegacyStoreReportShell.OLD_ORIGIN_DIR)
+
     fun start(context: Context, runner: PgpMigrationRunner) {
         if (!enabled || started) return
         started = true
         val app = context.applicationContext
         val init = ShellRecordInit(
-            webviewIdbDir = File(app.dataDir, "app_webview/Default/IndexedDB/https_appassets.androidplatform.net_0.indexeddb.leveldb"),
+            webviewIdbDir = legacyOriginIdbDir(app.dataDir),
             tempDir = File(app.noBackupFilesDir, "plan-n-p-copy"),
             store = null, state = state, runner = runner, log = ::log, importer = PageRecordImporter.Unavailable,
             firstRun = FirstRunImporters.current,
@@ -70,18 +107,60 @@ object ShellRecordChannel {
      * `window.BeamioShellRecord.postMessage(JSON)`; the reply is the SDK's JSON on `onmessage`. Every reply passes the exit
      * assertion (PGP private fields or header → refused, counts only in the log).
      */
+    /** The SDK's bare ack for a page-sync request (pwaWalletSync / nativeMnemonicPreread): the first ack emitted, or null on timeout. */
+    private const val SDK_ANSWER_TIMEOUT_MS = 10_000L
+
+    private fun sdkAnswer(appContext: Context, body: org.json.JSONObject): org.json.JSONObject? {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val answer = java.util.concurrent.atomic.AtomicReference<org.json.JSONObject?>(null)
+        BeamioConetChatModule.handleCommand(appContext, body) { payload ->
+            val event = payload.optJSONObject("event") ?: payload
+            if (event.optString("type") == "ack" && answer.compareAndSet(null, event)) latch.countDown()
+        }
+        latch.await(SDK_ANSWER_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        return answer.get()
+    }
+
     fun attach(webView: WebView) {
         if (!enabled) return
+        eventExit.reset() // channel rebuild: the trusted reply proxy is empty until the next trusted request
         val handler = PageBridgeHandlers.current ?: run { log("channel not attached: no SDK page bridge"); return }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) { log("channel unavailable (WEB_MESSAGE_LISTENER)"); return }
         WebViewCompat.addWebMessageListener(webView, JS_NAME, setOf(ORIGIN)) { _: WebView, message: WebMessageCompat, sourceOrigin: Uri, isMainFrame: Boolean, reply: JavaScriptReplyProxy ->
+            // Gate order (pwaWalletSync / nativeMnemonicPreread on this channel): the page-sync gate answers before the window source check,
+            // so an untrusted frame or origin gets untrusted_source (contract §十一), never origin_refused. The SDK sees only a trusted request.
+            message.data?.let { raw ->
+                PageSyncRoute.normalize(raw)?.let { pageSync ->
+                    val origin = sourceOrigin.toString()
+                    val appContext = webView.context.applicationContext
+                    worker.execute {
+                        val tStart = SystemClock.elapsedRealtime()
+                        val commandType = pageSync.optString("type")
+                        val trusted = ShellCredentialTrust.verdict(
+                            WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin, requireCapability = false,
+                            passcode = commandType in PageSyncRoute.PASSCODE_ALLOWED,
+                        ) == WalletCredentialGate.Verdict.TRUSTED
+                        if (trusted) eventExit.onTrusted(reply) // untrusted requests never change the proxy
+                        val answer = PageSyncRoute.channelAnswer(pageSync, trusted) { body -> sdkAnswer(appContext, body) }
+                        log(PageSyncRoute.logLine(pageSync.optString("type"), trusted, BridgeReqId.valid(pageSync.opt("reqId")), answer?.optString("error")?.takeIf { it.isNotEmpty() }))
+                        // 182 follow-up (2026-11-20): timed reply line for the page-sync window commands (names, reqId, ms, code only).
+                        ReqCorrelation.head(pageSync.toString())?.let { (t, r) ->
+                            ReqCorrelation.replyText("bridge", t, r, SystemClock.elapsedRealtime() - tStart, answer?.toString())
+                                ?.let { Log.i(ReqCorrelation.TAG, it) }
+                        }
+                        answer?.let { a -> main.post { runCatching { reply.postMessage(a.toString()) } } }
+                    }
+                    return@addWebMessageListener
+                }
+            }
             // r3os: source and frame first, before parsing: a mismatch answers origin_refused exactly once, nothing reaches the SDK.
             WalletCredentialGate.windowSourceRefusal(message.data, isMainFrame, sourceOrigin.toString())?.let { refused ->
                 log("channel origin_refused (frame or origin)")
                 reply.postMessage(refused); return@addWebMessageListener
             }
             // Spec r3cv §25.52AX.1: a message the channel cannot use gets exactly one answer, nothing reaches the SDK.
-            val data = message.data ?: run { reply.postMessage(BAD_REQUEST); return@addWebMessageListener }
+            // Defence in depth (2026-11-22): the page's own trustedOrigin never reaches the SDK on this channel.
+            val data = PageSyncRoute.stripPageTrustedOriginText(message.data ?: run { reply.postMessage(BAD_REQUEST); return@addWebMessageListener })
             val embedded = isMainFrame && sourceOrigin.toString().trimEnd('/') == ORIGIN
             val size = data.toByteArray(Charsets.UTF_8).size
             val origin = sourceOrigin.toString()
@@ -92,7 +171,7 @@ object ShellRecordChannel {
                 val parsed = body != null
                 var out = if (!parsed) BAD_REQUEST
                 else if (body!!.optString("type") in WalletCredentialGate.GATED_COMMANDS) {
-                    // PM R1911: walletEoaAddress (and later walletCredential) is answered by the SDK on this window channel.
+                    // walletEoaAddress (and later walletCredential) is answered by the SDK on this window channel.
                     // Shell gate before and after the SDK call; logs: names, verdict, code, ms only (log points 1-3).
                     val w = WalletCredentialGate.windowCredential(
                         body,
@@ -108,13 +187,15 @@ object ShellRecordChannel {
                     w.logs.forEach { log(it) }
                     w.reply
                 }
-                else try { handler.handle(embedded, data, size) } catch (e: Exception) { ShellRecordReplies.fallback(data) }
+                else shellRecordAnswer(QaReadFaults.current, body?.optString("type").orEmpty(), data) {
+                    try { handler.handle(embedded, data, size) } catch (e: Exception) { ShellRecordReplies.fallback(data) }
+                }
                 val hits = LegacyRecord.pgpPrivateHits(out.toCharArray())
                 if (hits != 0) { log("channel exit assert FAIL pgpPrivateHits=$hits"); out = ShellRecordReplies.fallback(data) }
                 else log("channel exit assert pass")
                 // Spec r3nq §25.52Y.41: W fields (privateKeyArmor, mnemonicPhrase, recoveryWords) leave only behind the
                 // trust gate (origin, main frame, verified bundle); otherwise the whole reply is not_trusted. This round no
-                // capability check (r3nt §25.52Y.43 item 6 (i), PM R1863). Logs: names, verdict, code, ms only.
+                // capability check (r3nt §25.52Y.43 item 6 (i)). Logs: names, verdict, code, ms only.
                 val gated = try {
                     WalletCredentialGate.gateShellRecordRead(data, out) {
                         ShellCredentialTrust.verdict(WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame, origin, requireCapability = false)
@@ -124,6 +205,11 @@ object ShellRecordChannel {
                     WalletCredentialGate.ShellRecordGateResult(WalletCredentialGate.shellRecordUnreadable(ShellRecordReplies.validReqId(data)), null, emptyList())
                 }
                 out = gated.reply
+                // 182 follow-up (2026-11-20): same-launch correlation for the window channel (names, reqId, ms, code only).
+                ReqCorrelation.head(data)?.let { (t, r) ->
+                    ReqCorrelation.replyText("bridge", t, r, SystemClock.elapsedRealtime() - started, out)
+                        ?.let { Log.i(ReqCorrelation.TAG, it) }
+                }
                 gated.verdict?.let { v ->
                     log(WalletCredentialGate.entryLine(WalletCredentialGate.SHELL_RECORD_READ, ShellRecordReplies.validReqId(data), v)) // log point 1
                     val ev = runCatching { org.json.JSONObject(out) }.getOrNull() ?: org.json.JSONObject()
@@ -141,7 +227,7 @@ internal object ShellRecordReplies {
     /**
      * Spec r3ef §25.52CF: the shell's answer when the SDK handler throws or its reply fails the exit assertion. Exactly one,
      * the request's reqId echoed, no rev, record, exception text or content.
-     * - shellRecordRead:  {type:"ack", reqId, ok:true, result:{code:"error", sub:"record_unreadable"}} (r3oo / PM R1930: storage
+ * - shellRecordRead: {type:"ack", reqId, ok:true, result:{code:"error", sub:"record_unreadable"}} (r3oo /: storage
      *   errors stay in result.code; only refusals such as origin_refused are envelope-level)
      * - shellRecordWrite: {type:"ack", reqId, ok:true, result:{code:"write_failed"}} (the page reads rev back before retrying)
      * - an invalid reqId never takes the fallback: {type:"ack", reqId:null, ok:false, error:"bad_request"}
@@ -166,3 +252,10 @@ internal object ShellRecordReplies {
 
     private fun envelope(reqId: Any?, error: String): String = ack(reqId).put("ok", false).put("error", error).toString()
 }
+
+/**
+ * The answer on the shellRecordRead / other-type path (2026-11-22). With no QA hook ([hook] null) this is
+ * exactly [normal]; the hook is consulted first only when installed (debugqa, -PchatQaHooks).
+ */
+internal fun shellRecordAnswer(hook: QaReadFault?, type: String, data: String, normal: () -> String): String =
+    hook?.replyFor(type, data) ?: normal()

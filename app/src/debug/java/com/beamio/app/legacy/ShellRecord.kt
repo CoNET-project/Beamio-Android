@@ -19,7 +19,7 @@ object ShellRecordRules {
         "pgpPassphrase", "profiles[*].chats[*].chatData.privateArmored",
     )
 
-    /** §25.52D.8 W class (EOA private key and mnemonic): refused until the owner approves a native copy. */
+    /** §25.52D.8 W class (EOA private key and mnemonic): refused until a native copy is approved. */
     val WALLET = setOf("profiles[*].privateKeyArmor", "walletVault.mnemonic", "mnemonic")
 
     private val PROFILE_FIELDS = listOf(

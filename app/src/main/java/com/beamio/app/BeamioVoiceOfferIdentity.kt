@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import org.json.JSONObject
+import network.conet.chat.nativekey.VoiceOfferDecrypt
 import kotlin.math.max
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -50,6 +51,8 @@ object BeamioVoiceOfferIdentity {
         /** Caller's user-PGP public key and mailbox route key (armored), signed in the offer. */
         val callerPgpArmored: String = "",
         val callerRouteArmored: String = "",
+        /** True only when the shell verified the offer (envelope and signatures). The PWA-reported display path stays false. */
+        val verified: Boolean = false,
     ) {
         /** Enough to answer or decline: a v3 offer with the caller's keys. */
         val answerable: Boolean
@@ -92,7 +95,7 @@ object BeamioVoiceOfferIdentity {
             var identity: ResolvedIdentity? = null
             try {
                 val secrets = BeamioChatPgpStore.load(app)
-                if (secrets == null) { // TEMP local integration (PM A1): no WebView private key check
+                if (secrets == null) { // TEMP local integration (A1): no WebView private key check
                     Log.w(TAG, "no stored user PGP; skip resolve")
                     return@execute
                 }
@@ -146,7 +149,7 @@ object BeamioVoiceOfferIdentity {
                 // chat-sdk-android 0.2.1 `decryptAndVerifyOffer` always reports
                 // decrypt_fail: its async JS returns a Promise to evaluateJavascript,
                 // which hands back "{}". Same checks via bridge methods that work.
-                decryptAndVerifyOfferViaBridge(app, offerArmor) { result -> // TEMP local integration (PM A1)
+                decryptAndVerifyOfferViaBridge(app, offerArmor) { result -> // TEMP local integration (A1)
                     result.onSuccess { payload = it }
                         .onFailure { decryptError = it.message }
                     synchronized(decryptWait) { decryptWait.notifyAll() }
@@ -181,6 +184,7 @@ object BeamioVoiceOfferIdentity {
                     proto = verified.optInt("proto", 0),
                     callerPgpArmored = verified.optString("callerPgpArmored", ""),
                     callerRouteArmored = verified.optString("callerRouteArmored", ""),
+                    verified = true,
                 )
                 identity = resolved
                 if (resolved.answerable) {
@@ -234,15 +238,86 @@ object BeamioVoiceOfferIdentity {
      * `decryptInboundArmor` + `verifyMessage`, which return results correctly.
      * Success JSON: callerEoa, callId, sessionId, to, claimedTag, proto, caller keys.
      */
+    /** Callee dedupe table, persisted under the app files dir (R3AE-1, r3af). */
+    @Volatile private var dedupeStore: VoiceOfferDedupeStore? = null
+
+    private fun dedupe(app: Context): VoiceOfferDedupeStore =
+        dedupeStore ?: synchronized(this) {
+            dedupeStore ?: VoiceOfferDedupeStore(
+                java.io.File(app.filesDir, "voice_offer_dedupe.json"),
+            ) { System.currentTimeMillis() }.also { dedupeStore = it }
+        }
+
+    /**
+     * Decrypt the armored offer (SDK VoiceOfferDecrypt, native vault), then verify the inner
+     * offer signature (R must equal the claimed from), then admit (R3AE-2 order: window, duplicate,
+     * quota) and record before the ring. Any failure is a failure callback: no ring (fail closed).
+     * The SDK does not verify the signature; that is done here.
+     */
     private fun decryptAndVerifyOfferViaBridge(
-        @Suppress("UNUSED_PARAMETER") app: Context,
-        @Suppress("UNUSED_PARAMETER") offerArmor: String,
+        app: Context,
+        offerArmor: String,
         callback: (Result<JSONObject>) -> Unit,
     ) {
-        // TEMP local integration (PM A1): the WebView decryption with the user's private key is removed. The chat SDK
-        // (a346d82) keeps native PGP decryption internal (NativeWallet.pgp / NativePgpVault.decryptInbound), so there is
-        // no public native call yet: the offer is unavailable, no fallback.
-        callback(Result.failure(IllegalStateException("native_pgp_decrypt_unavailable")))
+        val res = runCatching { VoiceOfferDecrypt.decryptVoiceOffer(app, offerArmor) }.getOrElse {
+            callback(Result.failure(IllegalStateException("decrypt_threw")))
+            return
+        }
+        when (res) {
+            is VoiceOfferDecrypt.Result.Fail -> callback(Result.failure(IllegalStateException(res.code)))
+            is VoiceOfferDecrypt.Result.Ok -> {
+                // Outer envelope (qa.5 gives from and signMessage only, not the signed text):
+                // the envelope signature cannot be checked without that text, so refuse
+                // envelope-form offers (fail closed; 29 v30 §33, chat interface spec 29 §50(3)).
+                // Envelope required (29 v30 §33; v49 §55): a bare signal is refused; the outer envelope
+                // signature must recover envelopeFrom over envelopeText, and envelopeFrom must equal the
+                // inner from. Nothing is verified, admitted, recorded or rung otherwise.
+                val envelopeForm = res.envelopeFrom.isNotEmpty() || res.envelopeSignMessage.isNotEmpty() ||
+                    res.envelopeText.isNotEmpty()
+                if (!envelopeForm) {
+                    callback(Result.failure(IllegalStateException("bare_signal_refused")))
+                    return
+                }
+                if (res.envelopeText.isEmpty() || res.envelopeSignMessage.isEmpty() || res.envelopeFrom.isEmpty()) {
+                    callback(Result.failure(IllegalStateException("envelope_incomplete")))
+                    return
+                }
+                val signal = runCatching { JSONObject(res.signalJson) }.getOrNull()
+                if (signal == null) {
+                    callback(Result.failure(IllegalStateException("signal_json_invalid")))
+                    return
+                }
+                val v = VoiceOfferWire.verifiedFields(signal)
+                if (v == null) {
+                    callback(Result.failure(IllegalStateException("offer_signature_not_verified")))
+                    return
+                }
+                if (!VoiceOfferWire.outerEnvelopeOk(res.envelopeText, res.envelopeSignMessage, res.envelopeFrom, v.from)) {
+                    callback(Result.failure(IllegalStateException("envelope_not_verified")))
+                    return
+                }
+                if (res.callId != v.callId || res.sessionId != v.sessionId) {
+                    callback(Result.failure(IllegalStateException("identifier_mismatch")))
+                    return
+                }
+                val verdict = dedupe(app).admitOffer(
+                    v.recoveredR, v.from, v.callId, v.sessionId, v.createdAtMs, v.expiresAtMs,
+                )
+                if (verdict is VoiceOfferAdmission.Verdict.Refuse) {
+                    callback(Result.failure(IllegalStateException("admission_" + verdict.reason.name.lowercase())))
+                    return
+                }
+                val out = JSONObject()
+                    .put("callerEoa", v.from)
+                    .put("callId", v.callId)
+                    .put("sessionId", v.sessionId)
+                    .put("to", v.to)
+                    .put("proto", v.proto)
+                    .put("callerPgpArmored", v.callerPgp)
+                    .put("callerRouteArmored", v.callerRoute)
+                callback(Result.success(out))
+            }
+        }
     }
 
     /**

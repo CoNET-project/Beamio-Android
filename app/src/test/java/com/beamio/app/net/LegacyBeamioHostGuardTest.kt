@@ -11,7 +11,7 @@ import java.net.ProxySelector
 import java.net.SocketAddress
 import java.net.URI
 
-/** PM 2026-11-17: no request to the legacy parking host beamio.app leaves the device; beamio.ca stays unchanged. */
+/** 2026-11-17: no request to the legacy parking host beamio.app leaves the device; beamio.ca stays unchanged. */
 class LegacyBeamioHostGuardTest {
     private val logs = mutableListOf<String>()
     private val delegateCalls = mutableListOf<String>()
@@ -156,7 +156,7 @@ class LegacyBeamioHostGuardTest {
         assertTrue("refusal sites: $refusals", refusals >= 4)
     }
 
-    // ---- external hand-off decisions (r8, PM 2026-11-17: positive and negative cases) ----
+    // ---- external hand-off decisions (r8, 2026-11-17: positive and negative cases) ----
 
     /** N6 (openURL bridge), N2/N4 (subdomains) are refused; P5 (third-party https) and P6 (market / Play) are not. */
     @Test

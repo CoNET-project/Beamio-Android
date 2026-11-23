@@ -1,7 +1,7 @@
 package com.beamio.app
 
 /**
- * Spec r3dt §25.52BU.2 with r3dx §25.52BX.1 (PM R709/R713/R716): a page-supplied URL for openURL or openInAppBrowser
+ * Spec r3dt §25.52BU.2 with r3dx §25.52BX.1: a page-supplied URL for openURL or openInAppBrowser
  * is checked before it is opened. A hit means: do not open, no event, answer
  * `{type:"ack", reqId, ok:false, error:"key_shaped_content"}` once, never echo the URL; logs carry only the rule number.
  *
@@ -9,13 +9,13 @@ package com.beamio.app
  *  1. a parameter name in the query or fragment (case-insensitive, exact) from [KEY_NAMES]; a name starts after any `?`,
  *     `#`, `&` or `;` (also one inside a value) and runs to the next `=`, `&`, `;`, `#`, `?` or the end, so
  *     `?privateKey&`, `#privateKey`, `?a=x?privateKey=1` and `#a#privateKey` all hit, while a value
- *     (`?title=privateKey`) does not (spec r3et §25.52CT.2, union reading, fail closed; PM R781);
+ * (`?title=privateKey`) does not (spec r3et §25.52CT.2, union reading, fail closed);
  *  2. `BEGIN PGP PRIVATE KEY` anywhere (case-sensitive);
  *  3. 12 or more consecutive English BIP-39 words separated by space, `+` or `%20`, anywhere;
  *  4. 64 or more consecutive hex characters (optional 0x, case-insensitive) in the query or fragment only; path segments
  *     are not checked (r3el §25.52CL.4 b: a 65-digit run hits);
  * Percent-decoding that fails (a `%` not followed by two hex digits, or bytes that are not UTF-8) is refused, fail closed
- * (PM R741, spec §25.52CK.5); it is logged as rule 5 (spec r3er §25.52CR.5, PM R770/R776/R781).
+ * (spec §25.52CK.5); it is logged as rule 5 (spec r3er §25.52CR.5).
  *
  * The check is a backstop; the page must never put a credential in a URL (§25.52BM.1).
  */

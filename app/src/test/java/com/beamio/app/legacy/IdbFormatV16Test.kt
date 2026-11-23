@@ -8,9 +8,9 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * V8 serializer version 16 (WebView 157 on the S25, R607 diagnosis `unsupported_format:v8 version 16`). Synthetic vectors from the
+ * V8 serializer version 16 (WebView 157 on the S25, diagnosis `unsupported_format:v8 version 16`). Synthetic vectors from the
  * Android SDK line (`plan-n/v8-v16-vectors.json`, no wallet data): v16 objects are read; B/V and unknown tags, v17 and v12 fail closed (7 cases since V16-07, a view tag V).
- * Every case also asserts that the input is unchanged: the row bytes passed in, and the vectors file itself (PM R619).
+ * Every case also asserts that the input is unchanged: the row bytes passed in, and the vectors file itself .
  */
 class IdbFormatV16Test {
     private val vectorsUrl = javaClass.classLoader!!.getResource("plan-n/v8-v16-vectors.json")!!

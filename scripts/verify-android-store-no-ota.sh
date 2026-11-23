@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Release gate: the Android shell `store` build must contain no remote PWA update path
-# (store-build OTA plan A and the shell/PWA protocol, PM decision 2026-11-12).
+# (store-build OTA plan A and the shell/PWA protocol, since 2026-11-12).
 # Read-only: it never changes the project or the artifacts.
 #
 #   scripts/verify-android-store-no-ota.sh [--expect-ota] DEX_DIR|FILE.apk|FILE.aab ...
 #
 # Fails (exit 1) when any dex contains:
-#   - the update manifest URL on the live domain and the old one (beamio.ca/app/update.json since R1626/R2030;
+# - the update manifest URL on the live domain and the old one (beamio.ca/app/update.json since the domain move;
 #     beamio.app/app/update.json kept as a legacy marker)
 #   - the update-available event name (embeddedPwaUpdateAvailable)
 #   - the capability bit (pwa.embedded-ota.v1, __CT_ANDROID_CAPS__)

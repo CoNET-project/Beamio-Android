@@ -18,7 +18,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * QA ONLY (PM R591, spec §25.37.4 A5 device evidence). Compiled only with -PchatQaHooks into debug builds; release and store
+ * QA ONLY (spec §25.37.4 A5 device evidence). Compiled only with -PchatQaHooks into debug builds; release and store
  * builds never contain this class (checked by scripts/verify-android-no-qa-hooks.sh).
  *
  * The page calls the SDK's QA-only native entry [NativeQaHooks.runCommand] (present only in the QA AAR built with
@@ -64,7 +64,7 @@ class QaNativeEvidenceActivity : Activity() {
         i?.getStringExtra("cmd")?.let { c ->
             when {
                 c == "status" -> status()
-                // R1601 emulator acceptance only: open the shell's own native import page (the same page the PWA opens), so an
+                // emulator acceptance only: open the shell's own native import page (the same page the PWA opens), so an
                 // isolated test key can be typed in for the data-retention check. Opens nothing when a key already exists.
                 c == "openImport" -> show("openImport -> " + com.beamio.app.nativekey.NativeKeyImportRoute.open())
                 c in COMMANDS -> run(c)
@@ -105,7 +105,7 @@ class QaNativeEvidenceActivity : Activity() {
         private val REQ = AtomicInteger(900_000_000)
 
         /**
-         * PM-approved A5 commands (R603) that the SDK's QA entry also allows (pgpRestoreEvaluate from SDK ab1ed76, read-only:
+ * -approved A5 commands that the SDK's QA entry also allows (pgpRestoreEvaluate from the SDK, read-only:
          * evaluate before pgpRestore). init and provisionIdentity are in the SDK allowlist but not approved here; import and
          * recovery are not offered.
          */

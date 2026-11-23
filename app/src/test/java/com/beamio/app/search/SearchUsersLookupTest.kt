@@ -5,7 +5,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import java.net.SocketTimeoutException
 
-/** PM 2026-11-17 (review 76706f6d): search-users goes to beamio.ca only, one checked redirect, no foreign host. */
+/** 2026-11-17: search-users goes to beamio.ca only, one checked redirect, no foreign host. */
 class SearchUsersLookupTest {
     private val address = "0x1234567890abcdef1234567890abcdef12345678"
 

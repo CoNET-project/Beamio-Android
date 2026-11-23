@@ -15,18 +15,21 @@ import org.json.JSONObject
  */
 object WalletCredentialGate {
     const val COMMAND = "walletCredential"
-    /** Spec r3nw/r3ob §25.52Y.42 item 5 (c)(d): address only, same trust gate (PM R1884, R1896 (3)). */
+    /** Spec r3nw/r3ob §25.52Y.42 item 5 (c)(d): address only, same trust gate ((3)). */
     const val ADDRESS_COMMAND = "walletEoaAddress"
     /** The commands that take this shell path. */
-    val GATED_COMMANDS: Set<String> = setOf(COMMAND, ADDRESS_COMMAND)
+    /** Frozen passcode protocol v1 §一第 7 条: the six passcode commands join the gated path (their field lists are PageSyncRoute's). */
+    val GATED_COMMANDS: Set<String> = setOf(COMMAND, ADDRESS_COMMAND) + PageSyncRoute.PASSCODE_ALLOWED.keys
     const val CAPABILITY = "wallet.credential.v1"
+    /** Frozen passcode protocol v1 §一第 5 条: the passcode capability, reported by the SDK's hello only; the shell never declares it. */
+    const val PASSCODE_CAPABILITY = "wallet.passcode.v1"
     const val SHELL_RECORD_READ = "shellRecordRead"
 
     const val NOT_TRUSTED = "not_trusted"
     const val BAD_REQUEST = "bad_request"
     const val KEY_OVER_BRIDGE_REFUSED = "key_over_bridge_refused"
     const val UNAVAILABLE = "unavailable"
-    /** shellRecordRead wire code for logical not_trusted (PM R1900; r3oh §25.52Y.41 item 6, §25.52D.6). */
+    /** shellRecordRead wire code for logical not_trusted (r3oh §25.52Y.41 item 6, §25.52D.6). */
     const val SHELL_RECORD_ORIGIN_REFUSED = "origin_refused"
 
     /** How a command reached the shell. Only the WebMessage listener (origin rule + main frame) may carry walletCredential. */
@@ -68,14 +71,20 @@ object WalletCredentialGate {
 
     /**
      * Order: channel, frame, origin (first filter only), then the build manifest, the native declaration and the bundle.
-     * [requireCapability] false (shellRecordRead this round, spec r3nt §25.52Y.43 item 6 (i), PM R1863): no capability
+ * [requireCapability] false (shellRecordRead this round, spec r3nt §25.52Y.43 item 6 (i)): no capability
      * check on either side; the bundle must still be the verified bytes of the hash this APK was built to load.
      */
-    fun evaluate(i: TrustInputs, requireCapability: Boolean = true): Verdict {
+    fun evaluate(i: TrustInputs, requireCapability: Boolean = true, passcode: Boolean = false): Verdict {
         if (i.channel != Channel.WEB_MESSAGE) return Verdict.CHANNEL_REFUSED
         if (!i.isMainFrame) return Verdict.FRAME_REFUSED
         val origin = ChatOriginGate.originOf(i.sourceOrigin) ?: i.sourceOrigin?.trimEnd('/')
         if (origin != ChatOriginGate.TRUSTED) return Verdict.ORIGIN_REFUSED
+        if (passcode) {
+            // Passcode commands (protocol v1 §一第 5 条): the SDK must report wallet.passcode.v1 (fail closed), and the bundle must be
+            // verified. The manifest capability bits are not used here; the shell declares nothing.
+            if (PASSCODE_CAPABILITY !in i.sdkCapabilities) return Verdict.SDK_NOT_DECLARED
+            return if (i.verifiedActiveZipSha256?.lowercase()?.let { SHA256.matches(it) } == true) Verdict.TRUSTED else Verdict.BUNDLE_NOT_VERIFIED
+        }
         if (!requireCapability) {
             // r3oj (h): the embedded bundle verified against the lock, or a download verified against the published
             // update.json; the store returns a hash only for one of those two.
@@ -107,9 +116,32 @@ object WalletCredentialGate {
     /**
      * Item 14 for every other chat command: the two credential field names this command introduces (`mnemonic`,
      * `eoaPrivateKey`, the names of item 11 (a)) are refused in requests and replies. No existing command carries either
-     * name, so no existing traffic changes; the SDK's own key_over_bridge_refused list (930988d NativeOpenRules) stays as is.
+     * name, so no existing traffic changes; the SDK's own key_over_bridge_refused list (NativeOpenRules) stays as is.
      */
     val OTHER_COMMAND_KEY_FIELDS: Set<String> = setOf("mnemonic", "eoaprivatekey")
+
+    /** Names that must not appear in any passcode-command reply (lower case): key material and the old/new passcode fields. */
+    private val PASSCODE_REPLY_REFUSED: Set<String> = KEY_FIELDS + setOf("phrase", "oldpasscode", "newpasscode")
+    private val PASSCODE_STATUS_WORD = Regex("^[a-z_]{1,24}$")
+
+    /**
+     * A reply's `passcode` field (the SDK's status, e.g. `set`) must be a status word; a digit string or any other value is a
+     * leaked passcode and fails the reply (protocol v1 §3, §4: no passcode value leaves the shell).
+     */
+    fun passcodeStatusOnly(v: Any?): Boolean {
+        fun walk(x: Any?, depth: Int): Boolean {
+            if (depth > 32) return false
+            return when (x) {
+                is JSONObject -> x.keys().asSequence().all { k ->
+                    val value = x.opt(k)
+                    (k.lowercase() != "passcode" || (value is String && PASSCODE_STATUS_WORD.matches(value))) && walk(value, depth + 1)
+                }
+                is JSONArray -> (0 until x.length()).all { walk(x.opt(it), depth + 1) }
+                else -> true
+            }
+        }
+        return walk(v, 0)
+    }
 
     private val REQUEST_FIELDS = setOf("type", "reqId")
     private val UNSEAL_FIELDS = setOf("type", "reqId", "mode", "blob")
@@ -125,7 +157,7 @@ object WalletCredentialGate {
      * field shape (walletEoaAddress takes only `{type, reqId}`). [verdict] is [evaluate] for this request.
      */
     fun checkRequest(body: JSONObject, verdict: Verdict): RequestCheck {
-        // r3os (PM R1953, R1955): a source or frame mismatch on either channel answers origin_refused exactly once, before
+        // r3os: a source or frame mismatch on either channel answers origin_refused exactly once, before
         // any other check, whatever the command and reqId (null when invalid). The JS-interface path cannot see the frame,
         // so it counts as a frame mismatch. not_trusted is only for an allowed source whose bundle or capability fails.
         if (verdict in SOURCE_REFUSALS) return RequestCheck.Refuse(BridgeReqId.valid(body.opt("reqId")), SHELL_RECORD_ORIGIN_REFUSED)
@@ -134,6 +166,12 @@ object WalletCredentialGate {
         val keyHits = keyFieldNames(body, KEY_FIELDS)
         if (keyHits.isNotEmpty()) return RequestCheck.Refuse(reqId, KEY_OVER_BRIDGE_REFUSED, keyHits)
         val names = body.keys().asSequence().toSet()
+        // Passcode commands: their own credential names (per command) and their own field list only (protocol v1 §一第 6 条).
+        PageSyncRoute.allowedFieldsFor(body.optString("type"))?.let { allowed ->
+            val passcodeHits = keyFieldNames(body, PageSyncRoute.forbiddenFieldsFor(body.optString("type")))
+            if (passcodeHits.isNotEmpty()) return RequestCheck.Refuse(reqId, KEY_OVER_BRIDGE_REFUSED, passcodeHits)
+            return if (names.all { it in allowed }) RequestCheck.Pass else RequestCheck.Refuse(reqId, BAD_REQUEST)
+        }
         val shapeOk = when {
             body.optString("type") == ADDRESS_COMMAND -> names == REQUEST_FIELDS
             !body.has("mode") -> names == REQUEST_FIELDS
@@ -153,10 +191,13 @@ object WalletCredentialGate {
      * Whether the SDK's ack for [command] may go to the page as is; when false it is replaced by
      * `{type:"ack", reqId, ok:false, error:"key_over_bridge_refused"}` (no field of it passes).
      * A failure ack passes only without a result and with no key field.
-     * walletCredential success: the mnemonic path only (PM R1884; §25.52Y.42 item 5 (b): an eoa_key account answers
+ * walletCredential success: the mnemonic path only (§25.52Y.42 item 5 (b): an eoa_key account answers
      * `unavailable`, so a reply with `eoaPrivateKey` never passes). walletEoaAddress success: `result` is exactly `{eoa}`.
      */
     fun responseAllowed(event: JSONObject, command: String = COMMAND): Boolean {
+        // Passcode replies (protocol v1): no key field and no passcode or phrase name anywhere in the reply; the result shape is the
+        // SDK's own (passcode:"set", eoa, verifiedAddress, ...), not the walletCredential mnemonic shape.
+        if (command in PageSyncRoute.PASSCODE_ALLOWED) return keyFieldNames(event, PASSCODE_REPLY_REFUSED).isEmpty() && passcodeStatusOnly(event)
         if (event.optString("type") != "ack") return keyFieldNames(event, KEY_FIELDS).isEmpty()
         if (event.opt("ok") != true) return !event.has("result") && keyFieldNames(event, KEY_FIELDS).isEmpty()
         val r = event.optJSONObject("result") ?: return false
@@ -171,7 +212,7 @@ object WalletCredentialGate {
     }
 
     /**
-     * W-L5 on the shell side (PM R1904; r3oh §25.52Y.38 item 8 (8e)): a walletCredential ack with
+ * W-L5 on the shell side (r3oh §25.52Y.38 item 8 (8e)): a walletCredential ack with
      * `credentialKind = "eoa_key"`, or an `eoaPrivateKey` field with no `mnemonic`, becomes `unavailable`, never reaching
      * the page, whatever the SDK did.
      */
@@ -179,7 +220,7 @@ object WalletCredentialGate {
         event.optJSONObject("result")?.optString("credentialKind") == "eoa_key" ||
             (keyFieldNames(event, setOf("eoaprivatekey")).isNotEmpty() && keyFieldNames(event, setOf("mnemonic")).isEmpty())
     // A reply with both mnemonic and eoaPrivateKey is W-N3, not W-L5: it fails responseAllowed and answers
-    // key_over_bridge_refused (§25.52Y.38 item 3 (c); reviewer on 0cd8bdf7; same as the iOS shell).
+    // key_over_bridge_refused (§25.52Y.38 item 3 (c); same as the iOS shell).
 
     // ---- other commands (§25.52Y.38 item 14: rules unchanged, walletCredential is the single exception) ----
 
@@ -241,7 +282,7 @@ object WalletCredentialGate {
         if (names.isEmpty()) return ShellRecordGateResult(reply, null, names)
         val v = verdict() // evaluated only when W fields would go out (hashing active/ is the costly step)
         if (v == Verdict.TRUSTED) return ShellRecordGateResult(reply, v, names)
-        // r3ow §25.52Y.41 item 6 (PM R1970, R1973, R1974): for shellRecordRead / shellRecordWrite both a source/frame
+        // r3ow §25.52Y.41 item 6 : for shellRecordRead / shellRecordWrite both a source/frame
         // mismatch and a bundle failure answer origin_refused (exception to r3os item 4: the PWA does not handle
         // not_trusted yet). not_trusted is only for the two new commands.
         return ShellRecordGateResult(shellRecordRefusal(BridgeReqId.fromJsonText(request)), v, names)
@@ -273,7 +314,7 @@ object WalletCredentialGate {
     }
 
     /**
-     * r3ok / PM R1912 (§25.52Y.42 item 5 (d)): walletEoaAddress checks origin, main frame and the bundle hash only, no
+ * r3ok / (§25.52Y.42 item 5 (d)): walletEoaAddress checks origin, main frame and the bundle hash only, no
      * capability bit; walletCredential keeps the dual capability check (§25.52Y.38 item 2).
      */
     fun requiresCapability(command: String): Boolean = command != ADDRESS_COMMAND
@@ -281,14 +322,14 @@ object WalletCredentialGate {
     fun refusal(reqId: Any?, error: String): JSONObject =
         JSONObject().put("type", "ack").put("reqId", reqId ?: JSONObject.NULL).put("ok", false).put("error", error)
 
-    // ---- window channel (BeamioShellRecord): walletEoaAddress / walletCredential (PM R1911) ----
+    // ---- window channel (BeamioShellRecord): walletEoaAddress / walletCredential ----
 
     /** [reply] goes to the page; [logs] are names, verdicts, codes and durations only. */
     class WindowResult(val reply: String, val logs: List<String>)
 
     /**
      * The window-channel path of a gated command (the SDK answers walletEoaAddress on the window channel, behind the same
-     * boundary as shellRecord: PM R1911, SDK 1b33f00). Shell side, in order: reqId; trust [verdict] (manifest bit,
+ * boundary as shellRecord in the SDK). Shell side, in order: reqId; trust [verdict] (manifest bit,
      * native declaration, verified bundle, origin, main frame: §25.52Y.42 item 5 (d) = §25.52Y.38 item 2); request shape
      * and key fields; then [sdk]; then the reply check (walletCredential eoa_key -> unavailable, W-L5; otherwise
      * [responseAllowed] for the command, else key_over_bridge_refused). Refusals use `{type:"ack", reqId, ok:false, error}`
@@ -306,7 +347,7 @@ object WalletCredentialGate {
         return try {
             val v = verdict()
             logs += entryLine(command, rid, v) // log point 1
-            // r3or §25.52Y.44 item 4 (PM R1952, source first): on the window channel a frame or origin mismatch answers
+            // r3or §25.52Y.44 item 4 (source first): on the window channel a frame or origin mismatch answers
             // origin_refused exactly once (reqId echoed when valid, else null), before any other check.
             if (v in SOURCE_REFUSALS) return done(refusal(rid, SHELL_RECORD_ORIGIN_REFUSED))
             if (rid == null) return done(refusal(null, BAD_REQUEST))

@@ -9,7 +9,7 @@ import org.junit.Test
 import java.io.File
 
 /**
- * Spec §25.52BU.2 / §25.52BX.2 (PM R716). Values below are synthetic: the BIP-39 phrase is the public all-zero test
+ * Spec §25.52BU.2 / §25.52BX.2 . Values below are synthetic: the BIP-39 phrase is the public all-zero test
  * vector ("abandon" x11 + "about"), the hex is a run of one repeated digit. No real key is used.
  */
 class UrlSecretCheckTest {
@@ -50,7 +50,7 @@ class UrlSecretCheckTest {
         assertEquals(1, UrlSecretCheck.ruleFor("https://any.example/p#privateKey"))
         assertEquals(1, UrlSecretCheck.ruleFor("https://any.example/p?a=1;seed"))
         assertEquals(1, UrlSecretCheck.ruleFor("https://any.example/p?privateKey"))
-        // r3et §25.52CT.2 (PM R781), union reading: a "?" inside a value and a second "#" start a name
+        // r3et §25.52CT.2, union reading: a "?" inside a value and a second "#" start a name
         assertEquals(1, UrlSecretCheck.ruleFor("https://x/p?a=x?privateKey=1"))
         assertEquals(1, UrlSecretCheck.ruleFor("https://x/p#a#privateKey"))
         assertEquals(1, UrlSecretCheck.ruleFor("https://x/p?a=1&privateKey"))
@@ -80,7 +80,7 @@ class UrlSecretCheckTest {
         assertNull(UrlSecretCheck.ruleFor("https://any.example/p?t=" + phrase.take(11).joinToString("+")))
     }
 
-    /** PM R741: percent-decoding that fails is refused (fail closed); logged as rule 5 (r3er §25.52CR.5, PM R781). */
+    /**: percent-decoding that fails is refused (fail closed); logged as rule 5 (r3er §25.52CR.5). */
     @Test
     fun badPercentEncodingIsRefused() {
         assertEquals(5, UrlSecretCheck.DECODE_FAILED)
@@ -99,7 +99,7 @@ class UrlSecretCheckTest {
         assertEquals("if (refuseKeyShapedUrl(url, null)) return", open.groupValues[1].trim())
         val inApp = Regex("private fun openInAppBrowserFromBridge\\(raw: String\\) \\{\\n[^\\n]*\\n([^\\n]*)\\n").find(src)
         checkNotNull(inApp)
-        // Refusal comes before the URL is used to open anything (audit review of 3e435e93, item 2).
+        // Refusal comes before the URL is used to open anything (item 2).
         val body = Regex("private fun openInAppBrowserFromBridge\\(raw: String\\) \\{(.*?)\\n    \\}", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
         val refuseAt = body.indexOf("if (refuseKeyShapedUrl(args.url, BridgeReqId.fromJsonText(raw))) return")
         val openAt = body.indexOf("sanitizedInAppBrowserUri(args.url)")

@@ -6,7 +6,7 @@
 # --only is required: the script never writes both shells in one run (project
 # owner single-ZIP rule, 2026-11-10: no double write from the sync script).
 #
-# Single-ZIP rule (.cursor/rules/beamio-native-shell-single-zip.mdc): each
+# Single-ZIP rule: each
 # shell's packaging folder holds exactly one ZIP, SilentPassUI.zip. The iOS
 # target is a file-system synchronized folder, so any other ZIP there (an old
 # version, a backup, a temp copy) ships inside the app. This script never
@@ -16,30 +16,40 @@
 # Usage:
 #   scripts/syncEmbeddedPwaZipToNativeShells.sh --only ios|android --zip PATH --sha256 HEX
 #       [--ver X.Y.Z]
-#       [--unreleased-test --freeze-manifest FILE | --approved-ver X --approved-sha HEX --approval TEXT]
+#       [--unreleased-test --freeze-manifest FILE | --unreleased-test --qa-manifest FILE |
+#        --unreleased-test --delegated-freeze-manifest FILE | --approved-ver X --approved-sha HEX --approval TEXT]
 #       [--archive-dir DIR] [--ios-resources DIR] [--android-app-dir DIR]
 #
 #   --only           the one shell to write: ios or android (required)
 #   --zip            the approved release ZIP (for example the file downloaded
 #                    from https://beamio.ca/app/SilentPassUI-<ver>.zip, or a
-#                    local candidate the PM approved)
+#                    local candidate approved by the release coordinator)
 #   --sha256         its approved SHA-256; the copy is refused if it differs
 #   --ver            expected update.json "ver" inside the ZIP (optional; when
 #                    omitted, the ZIP's own ver is used for the gates)
 #   --unreleased-test  the ZIP is a frozen, not-yet-released PWA above the
 #                    released version: test shells only (labelled 未发布测试).
-#                    Requires --freeze-manifest (PM, 2026-11-11).
+#                    Requires --freeze-manifest.
 #   --freeze-manifest  the PWA integration lead's freeze manifest JSON
-#                    (owner freeze rule, PM 2026-11-11; passed in by path). Before anything
+#                    (passed in by path). Before anything
 #                    is written: status must be "frozen", --sha256 must equal its
 #                    zip_sha256, the ZIP's ver must equal its version, and the
 #                    shared checker must pass with it. Both shells keep a copy as
 #                    pwa-freeze-manifest.json next to pwa-embed.lock.
-#   --qa-manifest FILE (PM R509) with --unreleased-test: a QA candidate, NOT FROZEN. Before anything is
+#   --qa-manifest FILE with --unreleased-test: a QA candidate, NOT FROZEN. Before anything is
 #                    written: status must be "qa-candidate", not_frozen true, freeze_kind
 #                    "qa-candidate-not-frozen", --sha256 must equal its zip_sha256 and the ZIP's ver its
 #                    version. The checker verdict is QA; it never makes a formal package. iOS keeps the copy
 #                    in the same declared input file, and the lock carries qa_manifest_* keys.
+#   --delegated-freeze-manifest FILE with --unreleased-test: the delegated formal freeze
+#                    manifest (freeze_kind pm-delegated-freeze). Cannot be combined with --freeze-manifest,
+#                    --qa-manifest or --approved-*. Before anything is written: the manifest's SHA-256 must be the
+#                    frozen 02b5ee56...; the pinned verify-delegated-freeze.py (sha256 26a43f7f...) must return PASS
+#                    for this shell in a temporary shell root holding a copy of the manifest (the temporary root is
+#                    removed afterwards); --sha256 must equal the manifest zip_sha256 and the ZIP's ver the manifest
+#                    version. Then the shell gets a byte copy of the manifest and a lock with freeze_* keys plus
+#                    delegated_* keys (no qa_* keys). A NO DELEGATION or REFUSED verdict (including a REVOKED marker)
+#                    refuses the run.
 #   --approved-ver / --approved-sha / --approval
 #                    the ZIP is an approved shell release above the released
 #                    version (all three required; version and SHA-256 must match)
@@ -57,10 +67,16 @@
 # or approval flag are refused), refuse to write when the selected shell's
 # packaging folder already holds a ZIP other than SilentPassUI.zip, write the
 # fixed-name copy for that shell only, write that shell's declaration
-# pwa-embed.lock (key=value; iOS: next to the Xcode project, read by the build
-# phase "Verify embedded PWA version"; Android: <app>/pwa-embed.lock, read by
-# app/build.gradle.kts and scripts/verify-android-pwa-embed-lock.sh) and the
-# freeze manifest copy, then run that shell's pre-build gates
+# pwa-embed.lock (key=value; iOS: next to the Xcode project; Android: <app>/pwa-embed.lock)
+# is written here for each shell. The Android Gradle build reads it: app/build.gradle.kts
+# takes zip_sha256 from the lock as the expected ZIP hash, and scripts/verify-android-
+# pwa-embed-lock.sh runs on every build (preBuild); that gate requires the zip_*/freeze_*
+# keys and, when app/pwa-freeze-manifest.json exists, checks it against freeze_*. The
+# iOS does not read the lock (confirmed read-only); the iOS
+# formal expected hash comes from the root frozen manifest. The gate branch's
+# src/CaehTrees does not carry the Gradle wiring; the Android branches do, and that is
+# the delivery tree. The script writes the ZIP copy, the freeze
+# manifest copy and the lock, then runs that shell's pre-build gates
 # (verify-ios-single-zip.sh pre, or verify-android-single-zip.sh prebuild and,
 # when present, verify-android-pwa-embed-lock.sh). The other shell's files are
 # never read for writing or touched.
@@ -77,6 +93,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 ZIP_NAME="SilentPassUI.zip"
+# Delegated formal freeze: the shared checker's reviewed sha256 and the frozen manifest's sha256.
+DELEG_CHECKER_PIN="26a43f7f19c3557bb673215815ffdf2a905aed70db2a2c560b4fe5e8c555b270"
+DELEG_MANIFEST_PIN="02b5ee5695774555aad1cfa18676ecf87f16af00bc7bc219f1ea7c6d43b8e6ab"
 
 IOS_DIR="${IOS_RESOURCES_DIR:-$REPO_ROOT/src/CashTrees_iOS/CashTrees_iOS/CashTrees_iOS}"
 ANDROID_APP="${ANDROID_APP_DIR:-$REPO_ROOT/src/CaehTrees/app}"
@@ -91,8 +110,9 @@ APPROVED_SHA=""
 APPROVAL=""
 ONLY=""
 FREEZE=""
+DELEG=""
 
-usage() { sed -n '2,68p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
@@ -105,6 +125,7 @@ while [[ $# -gt 0 ]]; do
 		--unreleased-test) UNRELEASED_TEST=1; shift ;;
 		--freeze-manifest) FREEZE="${2:?--freeze-manifest needs a file}"; shift 2 ;;
 		--qa-manifest) QA="${2:?--qa-manifest needs a file}"; shift 2 ;;
+		--delegated-freeze-manifest) DELEG="${2:?--delegated-freeze-manifest needs a file}"; shift 2 ;;
 		--approved-ver) APPROVED_VER="${2:?--approved-ver needs a value}"; shift 2 ;;
 		--approved-sha) APPROVED_SHA="${2:?--approved-sha needs a value}"; shift 2 ;;
 		--approval) APPROVAL="${2:?--approval needs a value}"; shift 2 ;;
@@ -121,8 +142,13 @@ case "$ONLY" in
 	*) echo "error: --only must be ios or android (got '$ONLY')" >&2; exit 2 ;;
 esac
 [[ -n "$SRC_ZIP" && -n "$SHA" ]] || { echo "--zip and --sha256 are required" >&2; usage; }
-if [[ "$UNRELEASED_TEST" == "1" && -z "$FREEZE" && -z "$QA" ]]; then
-	echo "error: --unreleased-test requires --freeze-manifest FILE or --qa-manifest FILE (only a frozen PWA, or a QA candidate, may go into a shell before release approval)" >&2; exit 2
+if [[ "$UNRELEASED_TEST" == "1" && -z "$FREEZE" && -z "$QA" && -z "$DELEG" ]]; then
+	echo "error: --unreleased-test requires --freeze-manifest FILE, --qa-manifest FILE or --delegated-freeze-manifest FILE (only a frozen PWA, or a QA candidate, may go into a shell before release approval)" >&2; exit 2
+fi
+if [[ -n "$DELEG" ]]; then
+	[[ "$UNRELEASED_TEST" == "1" ]] || { echo "error: --delegated-freeze-manifest needs --unreleased-test" >&2; exit 2; }
+	[[ -z "$FREEZE$QA" ]] || { echo "error: --delegated-freeze-manifest cannot be combined with --freeze-manifest or --qa-manifest (nothing was written)" >&2; exit 2; }
+	[[ -z "$APPROVED_VER$APPROVED_SHA$APPROVAL" ]] || { echo "error: --delegated-freeze-manifest cannot be combined with --approved-* (nothing was written)" >&2; exit 2; }
 fi
 if [[ -n "$QA" ]]; then
 	[[ "$UNRELEASED_TEST" == "1" ]] || { echo "--qa-manifest needs --unreleased-test (a QA candidate is never a formal package)" >&2; exit 2; }
@@ -191,7 +217,7 @@ PYFM
 	[[ "$VER" == "$FM_VER" ]] || die "ZIP ver $VER is not the frozen version $FM_VER"
 fi
 
-# --- 1a2. QA candidate manifest (PM R509): NOT FROZEN, hash and single ZIP only ---
+# --- 1a2. QA candidate manifest: NOT FROZEN, hash and single ZIP only ---
 QA_FILE_SHA=""; QA_VER=""; QA_SHA=""
 if [[ -n "$QA" ]]; then
 	[[ -f "$QA" ]] || die "qa manifest not found: $QA"
@@ -220,6 +246,78 @@ PYQA
 	[[ "$VER" == "$QA_VER" ]] || die "ZIP ver $VER is not the QA version $QA_VER"
 fi
 
+# --- 1a3. Delegated formal freeze -------------------
+# The manifest is checked by the pinned verify-delegated-freeze.py, run in a temporary shell root that holds a copy of the
+# manifest at the path the checker expects for this shell. Nothing is written to a shell root in this section.
+deleg_cleanup() {
+	if [[ -n "${DELEG_TMP:-}" ]]; then rm -rf -- "$DELEG_TMP"; fi
+	return 0
+}
+DELEG_TMP=""
+DELEG_FILE_SHA=""; DELEG_PASS_SHA=""; DELEG_APPROVAL_SHA=""
+if [[ -n "$DELEG" ]]; then
+	trap deleg_cleanup EXIT
+	[[ -f "$DELEG" ]] || die "delegated freeze manifest not found: $DELEG"
+	DELEG="$(cd "$(dirname "$DELEG")" && pwd -P)/$(basename "$DELEG")"
+	DELEG_FILE_SHA="$(shasum -a 256 "$DELEG" | awk '{print $1}')"
+	[[ "$DELEG_FILE_SHA" == "$DELEG_MANIFEST_PIN" ]] || die "delegated freeze manifest sha256 $DELEG_FILE_SHA is not the frozen $DELEG_MANIFEST_PIN (nothing was written)"
+	CHECKER="$SCRIPT_DIR/verify-delegated-freeze.py"
+	[[ -f "$CHECKER" && ! -L "$CHECKER" ]] || die "delegated checker missing: $CHECKER (nothing was written)"
+	[[ "$(shasum -a 256 "$CHECKER" | awk '{print $1}')" == "$DELEG_CHECKER_PIN" ]] || die "verify-delegated-freeze.py is not the pinned value (nothing was written)"
+	DM="$(/usr/bin/python3 -I - "$DELEG" <<'PYDM'
+import json, re, sys
+try:
+    m = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as e:
+    print("ERR unreadable: %s" % e); sys.exit(0)
+if not isinstance(m, dict) or m.get("status") != "frozen":
+    print("ERR status is not 'frozen'"); sys.exit(0)
+v, z = m.get("version"), m.get("zip_sha256")
+if not isinstance(v, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) or not isinstance(z, str) or not re.fullmatch(r"[0-9a-f]{64}", z):
+    print("ERR missing or bad version / zip_sha256"); sys.exit(0)
+print("OK %s %s" % (v, z))
+PYDM
+)"
+	case "$DM" in
+		OK\ *) read -r _ DM_VER DM_SHA <<< "$DM" ;;
+		*) die "delegated freeze manifest $DELEG: ${DM#ERR } (nothing was written)" ;;
+	esac
+	[[ "$SHA" == "$DM_SHA" ]] || die "--sha256 $SHA is not the manifest zip_sha256 $DM_SHA (nothing was written)"
+	[[ "$VER" == "$DM_VER" ]] || die "ZIP ver $VER is not the frozen version $DM_VER (nothing was written)"
+	DELEG_TMP="$(mktemp -d "${TMPDIR:-/tmp}/sync-delegated.XXXXXX")"
+	if [[ "$ONLY" == "ios" ]]; then
+		cp "$DELEG" "$DELEG_TMP/pwa-freeze-manifest.json"
+	else
+		mkdir "$DELEG_TMP/app"
+		cp "$DELEG" "$DELEG_TMP/app/pwa-freeze-manifest.json"
+	fi
+	set +e
+	DELEG_JSON="$(/usr/bin/python3 -I "$CHECKER" --shell "$ONLY" --shell-root "$DELEG_TMP" --zip "$SRC_ZIP")"
+	DRC=$?
+	set -e
+	deleg_cleanup
+	DELEG_TMP=""
+	echo "==> Delegated freeze checker ($ONLY, exit $DRC): $DELEG_JSON"
+	case "$DRC" in
+		0) ;;
+		3) die "no delegated freeze for this shell (checker verdict NO DELEGATION; nothing was written)" ;;
+		*) die "delegated freeze refused by verify-delegated-freeze.py (exit $DRC; nothing was written)" ;;
+	esac
+	DJ="$(printf '%s' "$DELEG_JSON" | /usr/bin/python3 -I -c '
+import json, sys
+d = json.load(sys.stdin)
+ok = d.get("result") == "PASS" and d.get("shell") == sys.argv[1] and d.get("version") == sys.argv[2] \
+    and d.get("zip_sha256") == sys.argv[3] and d.get("manifest_sha256") == sys.argv[4]
+print(("OK " if ok else "BAD ") + str(d.get("approval_txt_sha256", "")))
+' "$ONLY" "$VER" "$SHA" "$DELEG_FILE_SHA")" || DJ="BAD"
+	case "$DJ" in
+		OK\ *) DELEG_APPROVAL_SHA="${DJ#OK }" ;;
+		*) die "delegated PASS does not match the shell, version, ZIP or manifest (nothing was written)" ;;
+	esac
+	DELEG_PASS_SHA="$(printf '%s\n' "$DELEG_JSON" | shasum -a 256 | awk '{print $1}')"
+	echo "==> Delegated freeze: PASS: ver $VER, zip_sha256 $SHA, manifest_sha256 $DELEG_FILE_SHA, approval_txt_sha256 $DELEG_APPROVAL_SHA"
+fi
+
 # --- 1b. PWA version rule (shared with the Android shell) -------------------
 VERSION_GATE="$SCRIPT_DIR/verify-shell-pwa-version.sh"
 [[ -x "$VERSION_GATE" ]] || die "version checker missing: $VERSION_GATE"
@@ -230,6 +328,9 @@ if [[ -n "$APPROVED_VER$APPROVED_SHA$APPROVAL" ]]; then
 	[[ "$UNRELEASED_TEST" == "0" ]] || { echo "use either --unreleased-test or --approved-*, not both" >&2; exit 2; }
 	VG_ARGS+=(--approved-ver "$APPROVED_VER" --approved-sha "$APPROVED_SHA" --approval "$APPROVAL")
 	CLASSIFICATION="approved"
+elif [[ -n "$DELEG" ]]; then
+	VG_ARGS+=(--approved-ver "$VER" --approved-sha "$SHA" --approval "PM DELEGATED FREEZE approval_txt_sha256=$DELEG_APPROVAL_SHA")
+	CLASSIFICATION="delegated-freeze"
 elif [[ "$UNRELEASED_TEST" == "1" && -n "$QA" ]]; then
 	VG_ARGS+=(--unreleased-test --qa-manifest "$QA")
 	CLASSIFICATION="qa-candidate"
@@ -238,7 +339,15 @@ elif [[ "$UNRELEASED_TEST" == "1" ]]; then
 	CLASSIFICATION="unreleased-test"
 fi
 echo "==> PWA version rule: $VERSION_GATE ${VG_ARGS[*]}"
-"$VERSION_GATE" "${VG_ARGS[@]}" || die "PWA version rule failed (nothing was written)"
+VG_RC=0
+"$VERSION_GATE" "${VG_ARGS[@]}" || VG_RC=$?
+# Exit 4 is a QA-only result. It is accepted only for a qa-candidate run and is
+# never mapped to a formal pass: a formal pass is exit 0. Any other non-zero result refuses the write.
+if [[ $VG_RC -eq 4 && "$CLASSIFICATION" == "qa-candidate" ]]; then
+	echo "==> QA ONLY - NOT FROZEN (gate exit 4): this copy is a QA candidate, never a formal package"
+elif [[ $VG_RC -ne 0 ]]; then
+	die "PWA version rule failed (exit $VG_RC; nothing was written)"
+fi
 
 # --- 2. Refuse to write next to a stray ZIP ----------------------------------
 is_zip_file() {
@@ -300,14 +409,24 @@ write_lock() {
 		echo "zip_ver=$VER"
 		echo "classification=$CLASSIFICATION"
 		if [[ -n "$FREEZE" ]]; then
-			# File name only (PM R1670): no local absolute path in the lock; the build reads the fixed-name copy.
+			# File name only: no local absolute path in the lock; the build reads the fixed-name copy.
 			echo "freeze_manifest=$(basename "$FREEZE")"
 			echo "freeze_manifest_sha256=$FREEZE_FILE_SHA"
 			echo "freeze_ver=$FM_VER"
 			echo "freeze_zip_sha256=$FM_SHA"
 		fi
+		if [[ -n "$DELEG" ]]; then
+			# Delegated formal freeze: freeze_* keys carry the same meaning as for the owner freeze (the Android lock gate reads them).
+			echo "freeze_manifest=$(basename "$DELEG")"
+			echo "freeze_manifest_sha256=$DELEG_FILE_SHA"
+			echo "freeze_ver=$VER"
+			echo "freeze_zip_sha256=$SHA"
+			echo "delegated_pass_json_sha256=$DELEG_PASS_SHA"
+			echo "delegated_approval_txt_sha256=$DELEG_APPROVAL_SHA"
+			echo "delegated_checker_sha256=$DELEG_CHECKER_PIN"
+		fi
 		if [[ -n "$QA" ]]; then
-			# File name only (PM R1670): no local absolute path in the lock; the build reads the fixed-name copy.
+			# File name only: no local absolute path in the lock; the build reads the fixed-name copy.
 			echo "qa_manifest=$(basename "$QA")"
 			echo "qa_manifest_sha256=$QA_FILE_SHA"
 			echo "qa_ver=$QA_VER"
@@ -327,6 +446,7 @@ write_lock() {
 TMP_FILES=()
 cleanup() {
 	local t
+	deleg_cleanup
 	for t in "${TMP_FILES[@]+"${TMP_FILES[@]}"}"; do
 		[[ -e "$t" ]] && rm -f -- "$t"
 	done
@@ -348,10 +468,12 @@ if [[ "$ONLY" == "android" ]]; then
 	write_fixed "$ANDROID_APP/src/main/assets"
 	# Android declaration and freeze manifest copy: <app>/pwa-embed.lock and <app>/pwa-freeze-manifest.json.
 	ANDROID_MANIFEST="$ANDROID_APP/pwa-freeze-manifest.json"
-	if [[ -n "$FREEZE" ]]; then
-		cp "$FREEZE" "$ANDROID_MANIFEST"
+	ANDROID_MANIFEST_SRC="$FREEZE"
+	if [[ -n "$DELEG" ]]; then ANDROID_MANIFEST_SRC="$DELEG"; fi
+	if [[ -n "$ANDROID_MANIFEST_SRC" ]]; then
+		cp "$ANDROID_MANIFEST_SRC" "$ANDROID_MANIFEST"
 		chmod 644 "$ANDROID_MANIFEST"
-		echo "==> Wrote $ANDROID_MANIFEST (copy of $FREEZE)"
+		echo "==> Wrote $ANDROID_MANIFEST (copy of $ANDROID_MANIFEST_SRC)"
 	elif [[ -e "$ANDROID_MANIFEST" ]]; then
 		rm -f -- "$ANDROID_MANIFEST"
 		echo "==> Removed $ANDROID_MANIFEST (no freeze manifest for this ZIP)"
@@ -382,6 +504,8 @@ IOS_LOCK="$IOS_PROJ/pwa-embed.lock"
 # declared inputs inside the project). Always written, so the declared input exists.
 if [[ -n "$FREEZE" ]]; then
 	cp "$FREEZE" "$IOS_PROJ/pwa-freeze-manifest.json"
+elif [[ -n "$DELEG" ]]; then
+	cp "$DELEG" "$IOS_PROJ/pwa-freeze-manifest.json"  # byte copy of the delegated frozen manifest
 elif [[ -n "$QA" ]]; then
 	cp "$QA" "$IOS_PROJ/pwa-freeze-manifest.json"  # the QA copy uses the same declared input (NOT FROZEN)
 else

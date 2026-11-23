@@ -140,7 +140,7 @@ class LegacyPwaStoreTest {
         assertFalse(page.contains("OLD-REV-KEY"))
         assertFalse("r3br: residual PGP public fields stripped", page.contains("\"publicKey\"") || page.contains("\"pgpKey\""))
         assertTrue(page.contains("\"router\"")) // chatManager.router stays
-        assertTrue(page.contains("\"privateKeyArmor\":\"0xeoa\"")) // EOA stays with the page (R329)
+        assertTrue(page.contains("\"privateKeyArmor\":\"0xeoa\"")) // EOA stays with the page
         assertTrue(page.contains("\"mnemonicPhrase\""))
         val held = keys[0].privateArmor
         rec.wipe()

@@ -1,7 +1,7 @@
 package com.beamio.app
 
 /**
- * Beamio website hosts (PM R1626/R1637, owner-authorized move beamio.app → beamio.ca, 2026-11-15).
+ * Beamio website hosts (authorized move beamio.app → beamio.ca, 2026-11-15).
  *
  * Exact host names only, no wildcard. Network calls from the shell go to [CANONICAL] and nowhere else.
  * Local data does not depend on these hosts: the embedded page origin is https://appassets.androidplatform.net
@@ -16,11 +16,11 @@ object BeamioWebHosts {
 
     fun isWebHost(host: String?): Boolean = host?.lowercase() in WEB_HOSTS
 
-    /** The chat SDK's API base on the live domain (PM R2040). */
+    /** The chat SDK's API base on the live domain . */
     const val CHAT_API_BASE = "$CANONICAL_ORIGIN/api"
 
     /**
-     * PM R2040: the chat SDK (0.2.16-r1841qa) defaults `apiBaseUrl` to https://beamio.app/api and keeps it when an `init`
+ * Older chat SDK builds default `apiBaseUrl` to https://beamio.app/api and keeps it when an `init`
      * payload has none. The value to put into a page `init` so the SDK never falls back to the old domain: the live base
      * when the field is missing or blank, or the same URL moved to beamio.ca / www.beamio.ca when it names beamio.app /
      * www.beamio.app; null when the given value stays as it is.

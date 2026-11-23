@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 
 /**
- * QA-only write guard for the registration regression (PM and PWA integration lead, 2026-11-14). Same page rules as
+ * QA-only write guard for the registration regression (and PWA integration, 2026-11-14). Same page rules as
  * the iOS shell (CashTreesQAWriteGuard), plus a native backstop that WKWebView does not have.
  *
  * Active only in debug builds made with `-PqaWriteGuard=true` (`BuildConfig.QA_WRITE_GUARD`); release and store
@@ -35,19 +35,19 @@ object QaWriteGuard {
 
     val isActive: Boolean = BuildConfig.DEBUG && BuildConfig.QA_WRITE_GUARD
 
-    /** Isolation fixture R336 section 2.2: the only JSON-RPC methods that pass. */
+    /** Isolation fixture section 2.2: the only JSON-RPC methods that pass. */
     val READ_RPC_METHODS = listOf(
         "eth_call", "eth_getCode", "eth_getBalance", "eth_chainId", "eth_blockNumber", "eth_getTransactionReceipt",
         "eth_getTransactionByHash", "eth_getLogs", "eth_estimateGas", "eth_gasPrice", "net_version",
     )
 
-    /** R336 section 1: hosts whose JSON-RPC reads may pass. `qa-probe.invalid` is the synthetic probe host (never resolves). */
+    /** Section 1: hosts whose JSON-RPC reads may pass. `qa-probe.invalid` is the synthetic probe host (never resolves). */
     val RPC_HOSTS = setOf(
         "mainnet.conet.network", "publicrpc.conet.network", "rpc1.conet.network", "base-rpc.conet.network",
         "cancun-rpc.conet.network", "ethereum-rpc.publicnode.com", "eth.llamarpc.com", "qa-probe.invalid",
     )
 
-    /** R336 section 1: the only outside hosts reached at all (GET, plus RPC reads on [RPC_HOSTS]). Others are refused. */
+    /** Section 1: the only outside hosts reached at all (GET, plus RPC reads on [RPC_HOSTS]). Others are refused. */
     val READ_HOSTS = RPC_HOSTS + setOf("beamio.ca", "www.beamio.ca", "ipfs.conet.network")
 
     private val allowances = HashMap<String, MutableList<Long>>()
@@ -95,7 +95,7 @@ object QaWriteGuard {
         val s = scheme?.lowercase()
         if (s != "http" && s != "https") return true // data:, blob:, file: never leave the device
         if (isLocalHost(host)) return true
-        if (host!!.lowercase() !in READ_HOSTS) return false // R336 2.1: only the listed read-only hosts
+        if (host!!.lowercase() !in READ_HOSTS) return false // 2.1: only the listed read-only hosts
         if (isReadMethod(method)) return true
         if (host.lowercase() !in RPC_HOSTS) return false
         return consumeAllowance(method ?: "POST", url, now)
@@ -159,7 +159,7 @@ object QaWriteGuard {
     }
 
     /**
-     * R336 2.3: the native SDK's own HTTP is outside the WebView guard. In guard builds the shell passes only these
+ * 2.3: the native SDK's own HTTP is outside the WebView guard. In guard builds the shell passes only these
      * chat-module commands to the SDK (no network writes: handshake, status, native pages that read, cleanup).
      * Everything else (init, provisionIdentity, pgpIdentityCreate, pgpRestore, send, call control, ...) is answered
      * `qa_write_blocked` and never reaches the SDK.
@@ -202,7 +202,7 @@ object QaWriteGuard {
     }
 
     /**
-     * PM R675: the shell calls these two in every build; release and store get a no-op stub (src/qaGuardStub), so no QA
+ *the shell calls these two in every build; release and store get a no-op stub (src/qaGuardStub), so no QA
      * interface, page script or probe receiver is compiled into them.
      */
     fun installWebViewHooks(webView: android.webkit.WebView) {

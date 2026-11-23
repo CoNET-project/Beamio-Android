@@ -310,8 +310,8 @@ class IncomingCallActivity : Activity() {
     /** Wallet capsule on the full-screen layout (verified peer, else claimed). */
     private fun bindAddress(source: Intent?) {
         val capsule = findViewById<View>(R.id.incoming_call_address_capsule) ?: return
+        // Only the verified peer address is shown. The claimed address is unverified and must not appear on the lock screen.
         val address = source?.getStringExtra(BeamioTelecomService.EXTRA_PEER_ADDRESS).orEmpty().trim()
-            .ifBlank { source?.getStringExtra(BeamioTelecomService.EXTRA_CLAIMED_ADDRESS).orEmpty().trim() }
         if (address.isBlank()) {
             capsule.visibility = View.GONE
             return
@@ -325,7 +325,9 @@ class IncomingCallActivity : Activity() {
         callId = source?.getStringExtra(BeamioTelecomService.EXTRA_CALL_ID).orEmpty().trim()
         sessionId = source?.getStringExtra(BeamioTelecomService.EXTRA_SESSION_ID).orEmpty().trim()
         claimedTag = source?.getStringExtra(BeamioTelecomService.EXTRA_CLAIMED_TAG).orEmpty().trim()
-        val title = source?.getStringExtra(BeamioTelecomService.EXTRA_INCOMING_TITLE).orEmpty()
+        // A rebuilt activity (process death) restores the verified source from the window's own extra, so the title is the same.
+        source?.getStringExtra(BeamioTelecomService.EXTRA_VERIFIED_FROM)?.let { VerifiedCallerRegistry.put(callId, sessionId, it) }
+        val title = IncomingCallTitle.forCall(callId, sessionId)
             .ifBlank { getString(R.string.incoming_call_body) }
         findViewById<TextView>(R.id.incoming_call_title).text = title
         findViewById<TextView>(R.id.incoming_call_product_line).text =
@@ -1162,12 +1164,9 @@ class IncomingCallActivity : Activity() {
             val activity = instance?.get() ?: return
             if (activity.isFinishing) return
             val run = Runnable {
-                val nextTitle = title.trim().ifBlank { activity.getString(R.string.incoming_call_body) }
-                // Persist verified @BeamioTag so soft-reassert / FSI relaunch
-                // does not wipe the main line back to "Incoming call".
-                if (nextTitle.startsWith("@") && nextTitle.length in 2..33) {
-                    activity.claimedTag = nextTitle
-                    activity.intent?.putExtra(BeamioTelecomService.EXTRA_CLAIMED_TAG, nextTitle)
+                // v116 §135: the title is the verified from short address for this call; the passed title is not used.
+                val nextTitle = IncomingCallTitle.forCall(activity.callId, activity.sessionId).ifBlank {
+                    activity.getString(R.string.incoming_call_body)
                 }
                 activity.findViewById<TextView>(R.id.incoming_call_title)?.text = nextTitle
                 activity.bindAvatar(nextTitle)
@@ -1278,14 +1277,15 @@ class IncomingCallActivity : Activity() {
             BeamioUiThread.run {
                 if (activity.isFinishing || activity.isDestroyed) return@run
                 if (!activity.matches(callId, sessionId)) return@run
-                val title = displayName.trim().ifBlank {
-                    claimedTag.trim().ifBlank { peerAddress.trim() }
-                }.ifBlank { activity.getString(R.string.incoming_call_body) }
+                // v116 §135 (transitional, three ends alike): the title is the verified `from` short address.
+                // The claimed tag is secondary text only, labelled 未核验, and never used as a title or looked up.
+                val title = IncomingCallTitle.title(peerAddress).ifBlank { activity.getString(R.string.incoming_call_body) }
                 activity.claimedTag = claimedTag.trim().ifBlank { activity.claimedTag }
                 activity.findViewById<TextView>(R.id.incoming_call_title)?.text = title
                 activity.findViewById<TextView>(R.id.incoming_call_product_line)?.text =
-                    activity.getString(R.string.incoming_call_glass_subtitle)
+                    IncomingCallTitle.secondary(claimedTag) ?: activity.getString(R.string.incoming_call_glass_subtitle)
                 activity.bindWarning(identityWarning)
+                // Kept for internal comparison only. Never displayed: the lock-screen address capsule reads EXTRA_PEER_ADDRESS alone.
                 if (claimedAddress.isNotBlank()) {
                     activity.intent?.putExtra(BeamioTelecomService.EXTRA_CLAIMED_ADDRESS, claimedAddress)
                 }

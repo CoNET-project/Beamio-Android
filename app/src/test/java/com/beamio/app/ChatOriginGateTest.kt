@@ -7,7 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** PM R756 scheme 2 (spec r3ej §25.52CJ.3, r3em CM.3): chat channel origin gate. */
+/** scheme 2 (spec r3ej §25.52CJ.3, r3em CM.3): chat channel origin gate. */
 class ChatOriginGateTest {
     @Test
     fun originParsing() {
@@ -34,11 +34,14 @@ class ChatOriginGateTest {
     @Test
     fun wiring() {
         val src = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
-        val m = Regex("fun chatModuleCommand\\(json: String\\) \\{\\n[^\\n]*\\n([^\\n]*)\\n").find(src)
-        checkNotNull(m)
-        assertEquals("if (!ChatOriginGate.allowed(embeddedTopOrigin)) {", m.groupValues[1].trim())
         val body = Regex("fun chatModuleCommand\\(json: String\\) \\{(.*?)\\n        \\}\\n", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
-        // R763: the shared command path (JSON, reqId, SDK) moved to handleChatCommand, which the legacy entry calls only
+        // Gate order 2026-11-17: pwaWalletSync / nativeMnemonicPreread (and the passcode commands) enter the page-sync
+        // trust gate first and return; every other command meets the origin check as the first statement after that block.
+        val afterPageSync = body.substringAfter("PageSyncRoute.normalize(json)?.let { pageSync ->").substringAfter("\n                return\n            }\n")
+        assertEquals("if (!ChatOriginGate.allowed(embeddedTopOrigin)) {",
+            afterPageSync.lines().map { it.trim() }.first { it.isNotEmpty() && !it.startsWith("//") })
+        assertTrue(body.indexOf("PageSyncRoute.normalize(json)") < body.indexOf("ChatOriginGate.allowed"))
+        // the shared command path (JSON, reqId, SDK) moved to handleChatCommand, which the legacy entry calls only
         // after the origin gate; window.BeamioChat reaches it only through BeamioChatChannel.decide (origin and main frame).
         assertTrue(body.indexOf("ChatOriginGate.allowed") < body.indexOf("handleChatCommand(json, WalletCredentialGate.Channel.JS_INTERFACE)"))
         assertFalse(body.contains("BeamioConetChatModule.handleCommand"))

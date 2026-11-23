@@ -33,7 +33,7 @@ enum class RecoveryCode(val wire: String) {
     RECORD_INVALID("record_invalid"),
     WRITE_FAILED("write_failed"),
     READBACK_FAILED("readback_failed"),
-    /** SDK 0.2.11: the record is in the old format. Not in the PWA f2b53dc0 list (the page ignores this code). */
+    /** SDK 0.2.11: the record is in the old format. Not in the PWA's list (the page ignores this code). */
     LEGACY_RECORD("legacy_record"),
     ;
 

@@ -185,13 +185,13 @@ class EmbeddedPwaBundleStoreTest {
     }
 
     // Store build (remotePwaUpdate = false): the bundled zip is the only source.
-    // Cases follow the store-build OTA plan A (PM decision 2026-11-12): P1, N1, N2, N3, N6
+    // Cases follow the store-build OTA plan A (2026-11-12): P1, N1, N2, N3, N6
     // and same-sha-gate.md (S1, S3, S4, S8). Each case prints one evidence line with hashes.
 
     private val bundledVersion = "0.52.935"
     private val higherVersion = "0.52.999"
 
-    /** PM R900: the corruption hook lives here, in the test source set only (not in the app's classes). */
+    /**: the corruption hook lives here, in the test source set only (not in the app's classes). */
     private class TestableBundleStore(
         rootDir: File, openBundledZip: () -> java.io.InputStream, activatedAssetHash: ActivatedAssetHashStore,
         remotePwaUpdate: Boolean, expectedZipSha256: String?,
@@ -338,7 +338,7 @@ class EmbeddedPwaBundleStoreTest {
         println("EVIDENCE S8-zip zipSha256=${sha256(bundledZip!!)} expected=${"0".repeat(64)} activeExists=${store.activeDir.exists()}")
     }
 
-    /** PM R848: no full 64-hex digest in shell logs or log-bound messages (T-131 LS-G1); first 8 digits only. */
+    /**: no full 64-hex digest in shell logs or log-bound messages (T-131 LS-G1); first 8 digits only. */
     @Test
     fun noFullLengthDigestInBootstrapMessages() {
         bundledZip = zipOf(assetPrefix = "", version = bundledVersion)
@@ -357,7 +357,7 @@ class EmbeddedPwaBundleStoreTest {
         }
     }
 
-    /** PM R848 / audit r848 note: the replacement-mismatch message (store bootstrap, second exception) at runtime. */
+    /** The replacement-mismatch message (store bootstrap, second exception) at runtime. */
     @Test
     fun replacementMismatchMessageHasNoFullDigest() {
         bundledZip = zipOf(assetPrefix = "", version = bundledVersion)
@@ -488,7 +488,7 @@ class EmbeddedPwaBundleStoreTest {
 
     // helpers
 
-    // ---------- PM R1574: consumer black screen (embedded ZIP read failure with a valid active, missing JS) ----------
+    // ----------: consumer black screen (embedded ZIP read failure with a valid active, missing JS) ----------
 
     private val failingZip: () -> java.io.InputStream = { throw java.io.IOException("injected: asset read failed") }
 
@@ -500,17 +500,17 @@ class EmbeddedPwaBundleStoreTest {
     private fun snapshot(dir: File) = dir.walkTopDown().filter { it.isFile }.associate { it.relativeTo(dir).path to it.readBytes().contentHashCode() }
 
     @Test
-    fun r1574RemoteZipUnreadableKeepsACompleteActiveAndDeletesNothing() {
+    fun remoteZipUnreadableKeepsACompleteActiveAndDeletesNothing() {
         writeBundle(File(root, "active"), "", "0.53.0")
         val before = snapshot(File(root, "active"))
         remoteStore(failingZip).bootstrapIfNeeded() // no throw: the local UI is loadable
         assertEquals(before, snapshot(File(root, "active")))
         assertFalse(File(root, "bundled").exists())
-        println("EVIDENCE r1574 remote zip unreadable + complete active -> kept, files=${before.size}")
+        println("EVIDENCE remote zip unreadable + complete active -> kept, files=${before.size}")
     }
 
     @Test
-    fun r1574RemoteZipUnreadableWithoutActiveOrWithIncompleteActiveFails() {
+    fun remoteZipUnreadableWithoutActiveOrWithIncompleteActiveFails() {
         assertThrows(IllegalStateException::class.java) { remoteStore(failingZip).bootstrapIfNeeded() }
         val active = File(root, "active").apply { mkdirs() }
         File(active, "index.html").writeText(indexHtml("")) // names /static/js/main.js, which is missing
@@ -519,7 +519,7 @@ class EmbeddedPwaBundleStoreTest {
     }
 
     @Test
-    fun r1574RemoteActiveMissingJsIsReplacedByTheReadableBundledZip() {
+    fun remoteActiveMissingJsIsReplacedByTheReadableBundledZip() {
         val active = File(root, "active").apply { mkdirs() }
         File(active, "index.html").writeText(indexHtml(""))
         File(active, "update.json").writeText(updateJson("0.53.0"))
@@ -534,7 +534,7 @@ class EmbeddedPwaBundleStoreTest {
      * any active/ that had index.html, even one whose JS is missing. It must be replaced by the bundled zip.
      */
     @Test
-    fun r1574RemoteActiveMissingJsIsReplacedEvenWhenTheZipIsUnchanged() {
+    fun remoteActiveMissingJsIsReplacedEvenWhenTheZipIsUnchanged() {
         bundledZip = zipOf("", "0.53.0")
         hashStore.value = sha256(checkNotNull(bundledZip)) // nothing changed since the last activation
         val active = File(root, "active").apply { mkdirs() }
@@ -545,7 +545,7 @@ class EmbeddedPwaBundleStoreTest {
     }
 
     @Test
-    fun r1574StoreZipUnreadableLoadsActiveOnlyWhenVerifiedAsThisApksContent() {
+    fun storeZipUnreadableLoadsActiveOnlyWhenVerifiedAsThisApksContent() {
         bundledZip = zipOf("", "0.53.0")
         val sha = sha256(checkNotNull(bundledZip))
         storeStore(sha).bootstrapIfNeeded() // normal start writes both markers
@@ -554,11 +554,11 @@ class EmbeddedPwaBundleStoreTest {
         val before = snapshot(active)
         storeStoreWith(failingZip, sha).bootstrapIfNeeded() // verified: loads, nothing deleted
         assertEquals(before, snapshot(active))
-        println("EVIDENCE r1574 store zip unreadable + verified active -> loaded, files=${before.size}")
+        println("EVIDENCE store zip unreadable + verified active -> loaded, files=${before.size}")
     }
 
     @Test
-    fun r1574StoreZipUnreadableRefusesAnUnverifiedActiveButDeletesNothing() {
+    fun storeZipUnreadableRefusesAnUnverifiedActiveButDeletesNothing() {
         bundledZip = zipOf("", "0.53.0")
         val sha = sha256(checkNotNull(bundledZip))
         storeStore(sha).bootstrapIfNeeded()
@@ -579,12 +579,12 @@ class EmbeddedPwaBundleStoreTest {
     }
 
     @Test
-    fun r1574StoreZipUnreadableWithNoActiveFails() {
+    fun storeZipUnreadableWithNoActiveFails() {
         assertThrows(EmbeddedPwaBundleStore.BundleIntegrityException::class.java) { storeStoreWith(failingZip, "0".repeat(64)).bootstrapIfNeeded() }
     }
 
     @Test
-    fun r1574MissingScriptsIgnoresAbsoluteUrlsAndQueries() {
+    fun missingScriptsIgnoresAbsoluteUrlsAndQueries() {
         val d = tmp.newFolder()
         File(d, "index.html").writeText(
             """<script src="https://cdn.example/x.js"></script><script src="//cdn/y.js"></script>""" +
@@ -599,7 +599,7 @@ class EmbeddedPwaBundleStoreTest {
 
     /** Source guards: the unavailable page offers Retry, Retry reruns the local bootstrap only, and nothing goes to the remote site. */
     @Test
-    fun r1574UnavailablePageHasRetryAndNoRemoteFallback() {
+    fun unavailablePageHasRetryAndNoRemoteFallback() {
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(main.contains("EMBEDDED_RETRY_URL"))
         assertTrue(main.contains("Retry / 重试"))
@@ -614,9 +614,9 @@ class EmbeddedPwaBundleStoreTest {
         assertFalse("bootstrap does no network", store.contains("HttpURLConnection") || store.contains("URL("))
     }
 
-    /** PM R1595: the bootstrap fault hook exists only in the debug source set; release and store compile a pass-through. */
+    /**: the bootstrap fault hook exists only in the debug source set; release and store compile a pass-through. */
     @Test
-    fun r1595FaultHookIsDebugOnly() {
+    fun faultHookIsDebugOnly() {
         val debug = File("src/debug/java/com/beamio/app/qa/QaBootstrapFaults.kt").readText()
         val stub = File("src/qaGuardStub/java/com/beamio/app/qa/QaBootstrapFaults.kt").readText()
         assertTrue(debug.contains("beamio-qa-fault-bundled-zip") && debug.contains("throw IOException"))
@@ -743,7 +743,7 @@ class EmbeddedPwaBundleStoreTest {
         dir.mkdirs()
         File(dir, "index.html").writeText(indexHtml(assetPrefix))
         File(dir, "update.json").writeText(updateJson(version))
-        // PM R1574: a complete bundle has the scripts its index.html names (the real bundles always do).
+        // a complete bundle has the scripts its index.html names (the real bundles always do).
         File(dir, "${assetPrefix.removePrefix("/")}${if (assetPrefix.isEmpty()) "" else "/"}static/js/main.js".removePrefix("/")).apply { parentFile.mkdirs(); writeText("// fixture") }
     }
 

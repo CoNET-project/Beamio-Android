@@ -2,15 +2,15 @@ package com.beamio.app.nativekey
 
 /**
  * Shell bridge entries outside the SDK that are refused while the device has no native key (spec 25.26.4b, T-161;
- * PM ruling 2026-11-12). The check runs before the entry reads its argument, so the payload is never parsed.
+ * rule 2026-11-12). The check runs before the entry reads its argument, so the payload is never parsed.
  *
  * - G0 (no native record): `no_key`.
- * - G1 (a record, this session not initialised) should answer `not_ready`, but SDK e69b6c2 does not expose the
+ * - G1 (a record, this session not initialised) should answer `not_ready`, but the SDK of that time does not expose the
  *   session state to the shell, so G1 and G2 both pass through here. Recorded as a gap for the SDK line.
  * - Unknown (chat SDK without native key support): pass through, the behaviour before this change.
  *
  * `saveRecoveryQrToPhotos` and `registerPushDeviceHttp` from the iOS list have no Android entry; `scanRecoveryQr` was
- * removed from the Android shell (PM R820).
+ * removed from the Android shell .
  */
 object ShellNoKeyGate {
     const val NO_KEY = "no_key"
@@ -22,13 +22,13 @@ object ShellNoKeyGate {
         // chat notifications
         "clearOfflineChatAlerts", "notifyBackgroundChat",
         // PGP material
-        "postPgpCiphertext", // setNativeChatPgpSecrets removed (PM R679)
+        "postPgpCiphertext", // setNativeChatPgpSecrets removed
         // node configuration
         "setNativeVoiceRelayNodes", "setNativeSiNodeRoster",
         // signing reply, push binding
         "chatModuleSignResponse", "bindPushIdentity",
-        // scanRecoveryQr removed from the shell (PM R820)
-        // PM R675 (2026-11-14, spec r3cy §25.26.4b additions): call-related entries refused like the calls above
+        // scanRecoveryQr removed from the shell
+        // (2026-11-14, spec r3cy §25.26.4b additions): call-related entries refused like the calls above
         "notifyVoiceMicReady", "queryIncomingCallOutcome", "startNativeVoiceMic", "cacheCallerAvatars",
     )
 

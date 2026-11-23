@@ -8,7 +8,7 @@ import org.junit.Test
 import java.security.MessageDigest
 
 /**
- * window.BeamioShell channel vectors (spec r3gi §25.52EI; PM R861): protocol/beamioshell-channel-vectors.v1.json,
+ * window.BeamioShell channel vectors (spec r3gi §25.52EI): protocol/beamioshell-channel-vectors.v1.json,
  * pinned sha256 below, BS-01 to BS-12 (queryIncomingCallOutcome). Each case goes through BeamioShellChannel.decide and
  * IncomingCallOutcome.respond; the ack and every event are compared key set for key set (§25.52EC.2: no extra or missing
  * keys), events in order.
@@ -86,7 +86,7 @@ class BeamioShellVectorsTest {
         assertEquals((1..12).map { "BS-%02d".format(it) }, ran)
     }
 
-    /** audit r861 E2/E3: writer and reader agree on the key (no trim), empty ids never stored or matched, per-id keys never match. */
+    /** Writer and reader agree on the key (no trim), empty ids never stored or matched, per-id keys never match. */
     @Test
     fun recordAndQueryUseTheSameKey() {
         val store = HashSet<String>()

@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** window.BeamioChat (PM R763 scheme 1) decisions, and the embedded WebView never loading other origins top-level (R758). */
+/** window.BeamioChat (scheme 1) decisions, and the embedded WebView never loading other origins top-level . */
 class BeamioChatChannelTest {
     private val trusted = "https://appassets.androidplatform.net"
 
@@ -39,7 +39,7 @@ class BeamioChatChannelTest {
         assertTrue(src.contains("if (message.type == WebMessageCompat.TYPE_STRING) runCatching { message.data }.getOrNull() else null"))
         val none = BeamioChatChannel.decide(null, trusted, isMainFrame = true) as BeamioChatChannel.Decision.Answer
         assertEquals("bad_request", none.event.getString("error")); assertTrue(none.event.isNull("reqId"))
-        assertTrue(src.contains("onCommand(d.json) { payload -> toLatest(payload.toString()) }"))
+        assertTrue(src.contains("onCommand(d.json) { payload ->")); assertTrue(src.contains("toLatest(payload.toString())"))
         // refusals answer the sender only and never update the event target
         val answer = Regex("is Decision.Answer -> ([^\\n]*)").find(src)!!.groupValues[1]
         assertTrue(answer.startsWith("own(")); assertTrue(!answer.contains("latest"))
@@ -52,7 +52,7 @@ class BeamioChatChannelTest {
         assertTrue(src.contains("onCommand = { json, deliver -> handleChatCommand(json, WalletCredentialGate.Channel.WEB_MESSAGE, deliver) }"))
         // legacy channel: origin gate, then the same shared path
         assertTrue(src.contains("handleChatCommand(json, WalletCredentialGate.Channel.JS_INTERFACE) { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }"))
-        // R758: both shouldOverrideUrlLoading variants hand other-origin top-level navigations away from the embedded WebView
+        // both shouldOverrideUrlLoading variants hand other-origin top-level navigations away from the embedded WebView
         assertEquals(2, Regex("if \\(leaveEmbeddedForExternal\\(").findAll(src).count())
         val leave = Regex("private fun leaveEmbeddedForExternal\\(url: String\\): Boolean \\{(.*?)\\n    \\}", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
         assertTrue(leave.indexOf("UrlSecretCheck.ruleFor(url)") < leave.indexOf("openExternalUrlFromBridge(url)"))

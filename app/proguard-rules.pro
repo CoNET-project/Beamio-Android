@@ -45,3 +45,8 @@
 # Kotlin 元数据（反射/协程等由依赖自带 consumer rules；此处兜底）
 -dontwarn kotlin.**
 -dontwarn kotlinx.**
+
+# Native-key SDK binding (nativekeySdk variant): R8 would otherwise drop this object, since only MainActivity calls its install(),
+# and BeamioShellRecord would not be mounted in release. The class exists only in the nativekeySdk source set.
+-keep class com.beamio.app.nativekey.NativeKeySdkBinding { *; }
+-keep class com.beamio.app.nativekey.NativeKeySdkBinding$* { *; }

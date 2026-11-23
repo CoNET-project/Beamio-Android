@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** window.BeamioShell (PM R766/R771/R789): decisions, and which methods stay on addJavascriptInterface. */
+/** window.BeamioShell: decisions, and which methods stay on addJavascriptInterface. */
 class BeamioShellChannelTest {
     private val trusted = "https://appassets.androidplatform.net"
 
@@ -42,7 +42,7 @@ class BeamioShellChannelTest {
         assertEquals("", mic.arg)
     }
 
-    /** R771 / CV.2: no sensitive method is @JavascriptInterface on the base bridge; the kept ones are exactly these 13 (PM R820). */
+    /** / CV.2: no sensitive method is @JavascriptInterface on the base bridge; the kept ones are exactly these 13 . */
     @Test
     fun oldBridgeKeepsOnlyNonSensitiveMethods() {
         val src = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
@@ -55,23 +55,33 @@ class BeamioShellChannelTest {
             "clearOfflineChatAlerts", "notifyBackgroundChat", "debugLog", "chatModuleAvailable", "chatModuleIsRunning",
         )
         assertEquals(kept, annotated)
-        assertEquals(21, BeamioShellChannel.ACTIONS.size) // PM R820: +queryIncomingCallOutcome, +notifyVoiceMicReady, -scanRecoveryQr
+        assertEquals(25, BeamioShellChannel.ACTIONS.size) // +queryIncomingCallOutcome, +notifyVoiceMicReady, -scanRecoveryQr;
+        // +nativeIdentityCheck, +uiLockState (qa.8 public entries), +incomingCallUnlockShown (A3),
+        // +dismissIncomingSystemCall (v46 §52)
         for (name in BeamioShellChannel.ACTIONS.keys + listOf("chatModuleCommand", "chatModuleSignResponse")) {
             assertFalse("$name must not be on the base bridge", name in annotated)
         }
         // The legacy subclass is the only place that re-exposes them, and only behind the build flag.
         val legacy = Regex("private inner class CashTreesJsBridgeLegacy : CashTreesJsBridge\\(\\) \\{(.*?)\\n    \\}", RegexOption.DOT_MATCHES_ALL).find(src)!!.groupValues[1]
         val reexposed = Regex("@JavascriptInterface override fun (\\w+)").findAll(legacy).map { it.groupValues[1] }.toSet()
-        assertEquals(BeamioShellChannel.ACTIONS.keys + setOf("chatModuleCommand", "chatModuleSignResponse"), reexposed)
+        // Legacy-bridge invariant, amended 2026-11-23 (minimum exposure): the legacy bridge re-exposes every ACTION
+        // except the new identity / unlock commands below, which never go out over the sensitive legacy bridge.
+        val legacyExcluded = setOf("nativeIdentityCheck", "uiLockState", "incomingCallUnlockShown")
+        assertTrue(BeamioShellChannel.ACTIONS.keys.containsAll(legacyExcluded))
+        assertEquals(BeamioShellChannel.ACTIONS.keys - legacyExcluded + setOf("chatModuleCommand", "chatModuleSignResponse"), reexposed)
+        // The excluded commands have no entry at all on the legacy subclass (nor on the base bridge, checked above).
+        for (name in legacyExcluded) {
+            assertFalse("$name must not be on the legacy bridge", Regex("fun\\s+$name\\s*\\(").containsMatchIn(legacy))
+        }
         assertTrue(src.contains("if (BuildConfig.LEGACY_SENSITIVE_BRIDGE) CashTreesJsBridgeLegacy() else CashTreesJsBridge()"))
-        assertTrue(src.contains("BeamioShellChannel.attach(this) { call -> handleShellCall(jsBridge, call) }"))
+        assertTrue(src.contains("BeamioShellChannel.attach(this) { call, gate -> handleShellCall(jsBridge, call, gate) }"))
     }
 
     @Test
     fun dispatcherRefusesBeforeCalling() {
         val src = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         val body = Regex("private fun handleShellCall\\(.*?\\n    \\}\\n", RegexOption.DOT_MATCHES_ALL).find(src)!!.value
-        val gate = body.indexOf("ShellNoKeyGate.answer(c.action)")
+        val gate = body.indexOf("gate?.let")  // the gate result is computed off main and passed in (ANR fix 2026-11-17)
         val urlCheck = body.indexOf("UrlSecretCheck.ruleFor(url)")
         val firstCall = body.indexOf("bridge.openURL(")
         assertTrue(gate in 0 until urlCheck); assertTrue(urlCheck < firstCall)

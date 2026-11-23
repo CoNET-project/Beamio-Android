@@ -3,8 +3,6 @@ package com.beamio.app.nativekey
 import android.content.Context
 import network.conet.chat.nativekey.NativeAccountCreate
 import network.conet.chat.nativekey.NativeAccountCreateHost
-import network.conet.chat.nativekey.NativeImport
-import network.conet.chat.nativekey.NativeImportHost
 import network.conet.chat.nativekey.NativeRecovery
 import network.conet.chat.nativekey.NativeRecoveryHost
 import network.conet.chat.nativekey.NativeWallet
@@ -15,7 +13,7 @@ import network.conet.chat.nativekey.NativeWalletVault
  *
  * - `NativeImportHost.launcher` opens the shell's native import page ([NativeKeyImportRoute]); the SDK answers
  *   `nativeImportOpen` with an ack that carries no data.
- * - No expected account is passed: SDK e69b6c2 does not expose the session's account to the shell, so the import
+ * - No expected account is passed: the SDK of that time does not expose the session's account to the shell, so the import
  *   only derives (spec 25.25.2 item 4, "no context"). Recorded as a platform difference.
  */
 object NativeKeySdkBinding {
@@ -30,7 +28,8 @@ object NativeKeySdkBinding {
             if (installed) return
             val app = context.applicationContext
             NativeKeyBackends.current = SdkBackend(app)
-            NativeImportHost.launcher = { NativeKeyImportRoute.open() }
+            // 0.2.27 has no native import page (spec r2.3 41(1): nativeImportOpen removed; the typed-input import is internal only).
+            // The shell keeps its own import route; the SDK has no launcher to set (see SdkBackend).
             // QA: recovery by recovery code (spec r3u 25.42, path A). Its own page; never the import page.
             NativeRecoveryBackends.current = SdkRecoveryBackend(app)
             NativeRecoveryHost.launcher = { NativeRecoveryRoute.open() }
@@ -49,11 +48,11 @@ object NativeKeySdkBinding {
 
         override fun sessionReady(): Boolean? = network.conet.chat.BeamioConetChatModule.isNativeSessionReady()
 
-        override fun importPrivateKey(raw: String): ImportCode =
-            ImportCode.fromWire(NativeImport.submit(raw, null, NativeWallet.vault(app)).code.wire)
+        // SDK 0.2.27 exposes no typed-input import: NativeImport.submit / submitMnemonic were removed from the public API with the
+        // native import page (spec r2.3 41). The import is refused as not_supported, never reported as success. Missing API: see handoff.
+        override fun importPrivateKey(raw: String): ImportCode = ImportCode.NOT_SUPPORTED
 
-        override fun importMnemonic(raw: String): ImportCode =
-            ImportCode.fromWire(NativeImport.submitMnemonic(raw, null, NativeWallet.vault(app)).code.wire)
+        override fun importMnemonic(raw: String): ImportCode = ImportCode.NOT_SUPPORTED
     }
 
     /** SDK 0.2.11 paths A and B. Secrets go to the SDK only; both copies are wiped. Waits for the SDK's callback. */

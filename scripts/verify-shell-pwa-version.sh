@@ -4,7 +4,7 @@
 # that is either an explicitly approved release or a local unreleased test.
 # Read-only: never changes the project, the ZIP, OTA or production.
 #
-# "Released" = the live OTA manifest (default https://beamio.ca/app/update.json; beamio.app until R1626):
+# "Released" = the live OTA manifest (default https://beamio.ca/app/update.json):
 #   its "ver", and the SHA-256 of the ZIP it names (streamed, not saved).
 #
 # Modes:
@@ -37,12 +37,10 @@
 #                             The record is a separate file here, never the manifest and never outside this
 #                             directory; it must hold these whole lines once each: OWNER FREEZE APPROVAL,
 #                             version: X, zip_sha256: Y, manifest_sha256: <sha256 of the manifest bytes>,
-#                             approved_by: project-owner. Records are written only by the project's PM, from the
-#                             project owner's verbatim words. No other session may write or complete one.
-#                             Basis (project owner's decision, relayed by the 总 PM, 2026-11-14, words
-#                             "PM 记录即可"): the record needs no signature and need not be submitted by the
-#                             project owner in person; the 总 PM writes it from the owner's words. The gate
-#                             therefore adds no signature check (review 45424276 item 6 is closed on this basis).
+#                             approved_by: project-owner. Records are written only by the project's release
+#                             coordinator, from the project owner's own statement. No other session may write or
+#                             complete one. The record needs no signature and need not be submitted by the project
+#                             owner in person, so the gate adds no signature check.
 #                             Test fixtures are labelled "FIXTURE，非真实批准" and are never approval.
 #   --qa-manifest FILE        QA candidate manifest (status "qa-candidate", not_frozen JSON true, not_for_release /
 #                             not_for_store / not_for_ota JSON true, freeze_kind "qa-candidate-not-frozen", release_state
@@ -57,32 +55,283 @@
 # --unreleased-test is given. Exit: 0 pass, 1 fail, 2 usage error.
 
 set -euo pipefail
+# Hardening: git environment overrides must not redirect the identity check to another repository.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
+# every GIT_CONFIG_* variable (including GIT_CONFIG_COUNT, GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n) is cleared as well
+for __gv in $(env | sed -n 's/^\(GIT_CONFIG_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$__gv"; done
+# bash 3.2 safe argument check: a missing or empty value is a usage error (exit 2), never a silent pass.
+need_arg() { if [[ $# -lt 2 || -z "$2" ]]; then echo "error: $1 needs a value" >&2; exit 2; fi; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() { sed -n '2,57p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [[ $# -ge 1 ]] || usage
 MODE="$1"; shift
-case "$MODE" in zip|android-prebuild|android-artifact) ;; -h|--help) usage ;; *) echo "error: unknown mode $MODE" >&2; exit 2 ;; esac
+case "$MODE" in zip|android-prebuild|android-artifact|ios-prebuild|ios-artifact) ;; -h|--help) usage ;; *) echo "error: unknown mode $MODE" >&2; exit 2 ;; esac
 
-URL="https://beamio.ca/app/update.json"  # R1626: domain moved from beamio.app (owner-authorized); strict TLS
+# --- iOS modes. Released-version rules run through this script's own zip mode; the delegated
+# check runs in verify-delegated-freeze.py; the iOS single-ZIP gate runs last. Other modes are unchanged below.
+# iOS repository identity (read from the environment, no built-in default). An --ios-root is accepted only
+# when ALL of these hold (see ios_identity_check): (1) its real path is the iOS repository or lies under one of the two allowed
+# roots below, with the trailing separator; (2) no ancestor of the root, up to /, is a symbolic link; (3) its git common directory
+# equals IOS_REPO_COMMON_DIR_PINNED (the iOS repository's .git, never a temporary worktree path); (4) its working tree is clean
+# (git status --porcelain prints nothing, untracked files count); (5) its full HEAD hash is printed for the receipt.
+# Any failure, or any inability to establish identity, refuses every iOS mode.
+# Trust anchor: the environment variables named in this script (BEAMIO_GATE_IOS_REPO, BEAMIO_GATE_IOS_WORKTREES) may be set only by trusted
+# private configuration of the machine running the gate. Scripts and shell repositories in the repository must never set them.
+# The identity of the iOS repository is the public origin address below plus the git common directory; the variable only locates it.
+IOS_ORIGIN_EXPECTED="https://github.com/CoNET-project/Beamio-iOS.git"
+norm_git_url() {  # canonical lower-case https form without .git: accepts https, http, git@host:path and ssh://git@host/path
+	local u="${1%/}"; u="${u%.git}"
+	case "$u" in
+		git@github.com:*) u="https://github.com/${u#git@github.com:}" ;;
+		ssh://git@github.com/*) u="https://github.com/${u#ssh://git@github.com/}" ;;
+		http://github.com/*) u="https://github.com/${u#http://github.com/}" ;;
+	esac
+	printf '%s' "$u" | tr 'A-Z' 'a-z'
+}
+# BEAMIO_GATE_IOS_REPO = absolute path of the iOS repository; BEAMIO_GATE_IOS_WORKTREES = optional absolute path of the folder holding its
+# worktrees. Unset, relative or missing means every iOS mode is refused (there is no default allow).
+IOS_ALLOWED_ROOT_A="${BEAMIO_GATE_IOS_REPO:-}"
+IOS_ALLOWED_ROOT_B="${BEAMIO_GATE_IOS_WORKTREES:-}"
+IOS_REPO_COMMON_DIR_PINNED="${BEAMIO_GATE_IOS_REPO:+$BEAMIO_GATE_IOS_REPO/.git}"
+ios_identity_check() {  # $1 = --ios-root as given; returns 0 when identity is established, else prints FAIL and returns 1
+	local given="$1" abs real common top head st
+	[[ -n "$IOS_ALLOWED_ROOT_A" && "$IOS_ALLOWED_ROOT_A" == /* && -d "$IOS_ALLOWED_ROOT_A" ]] \
+		|| { echo "FAIL: BEAMIO_GATE_IOS_REPO is not set to an existing absolute directory: iOS modes refused" >&2; return 1; }
+	[[ -z "$IOS_ALLOWED_ROOT_B" || "$IOS_ALLOWED_ROOT_B" == /* ]] \
+		|| { echo "FAIL: BEAMIO_GATE_IOS_WORKTREES is not an absolute path: iOS modes refused" >&2; return 1; }
+	[[ -d "$given" ]] || { echo "FAIL: iOS root not found or not a directory: $given: refused" >&2; return 1; }
+	abs="$(cd "$given" 2>/dev/null && pwd -L)" || { echo "FAIL: cannot resolve iOS root $given: refused" >&2; return 1; }
+	real="$(cd "$given" 2>/dev/null && pwd -P)" || { echo "FAIL: cannot resolve real path of iOS root $given: refused" >&2; return 1; }
+	# (2) no ancestor (including the root itself) is a symbolic link, and the logical path is already the real path
+	local p="$abs"
+	while [[ -n "$p" && "$p" != "/" ]]; do
+		[[ ! -L "$p" ]] || { echo "FAIL: iOS root $given has a symbolic link in its path ($p): refused" >&2; return 1; }
+		p="$(dirname "$p")"
+	done
+	[[ "$abs" == "$real" ]] || { echo "FAIL: iOS root $given realpath $real differs from its path: refused" >&2; return 1; }
+	# (1) allowed prefixes, with the trailing separator (Beamio-iOS-evil is refused)
+	if [[ "$real" == "$IOS_ALLOWED_ROOT_A" || "$real" == "$IOS_ALLOWED_ROOT_A/"* || ( -n "$IOS_ALLOWED_ROOT_B" && "$real" == "$IOS_ALLOWED_ROOT_B/"* ) ]]; then :; else
+		echo "FAIL: iOS root $real is outside the allowed iOS roots: refused" >&2; return 1
+	fi
+	# the root must be the top of its own working tree, not a subdirectory of some repository
+	top="$(git -C "$real" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" && [[ "$top" == "$real" ]] \
+		|| { echo "FAIL: iOS root $real is not the top of a git working tree: refused" >&2; return 1; }
+	# (3a) the origin remote must be the public iOS repository address (identity), not merely the located path
+	local origin
+	origin="$(git -C "$real" remote get-url origin 2>/dev/null)" && [[ -n "$origin" ]] \
+		|| { echo "FAIL: iOS root $real has no origin remote: refused" >&2; return 1; }
+	[[ "$(norm_git_url "$origin")" == "$(norm_git_url "$IOS_ORIGIN_EXPECTED")" ]] \
+		|| { echo "FAIL: iOS root $real has origin $origin, not the iOS repository $IOS_ORIGIN_EXPECTED: refused" >&2; return 1; }
+	# (3) git common directory must be the pinned iOS repository
+	common="$(git -C "$real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [[ -n "$common" ]] \
+		|| { echo "FAIL: cannot read the git common directory of $real: refused" >&2; return 1; }
+	[[ "$common" == "$IOS_REPO_COMMON_DIR_PINNED" ]] \
+		|| { echo "FAIL: iOS root $real has git common dir $common, not the pinned $IOS_REPO_COMMON_DIR_PINNED: refused" >&2; return 1; }
+	# (4) clean working tree (untracked files count)
+	# Known limitation: git status --porcelain does not list gitignored files, so a gitignored build product (for example
+	# Vendor/X19) does not make the root dirty. Untracked and modified tracked files do. The ZIP content is checked by the single-ZIP gate,
+	# not here. The genuine-root pass on the real iOS checkout is checked in QA, not by this test.
+	st="$(git -C "$real" status --porcelain 2>/dev/null)" || { echo "FAIL: cannot read git status of $real: refused" >&2; return 1; }
+	[[ -z "$st" ]] || { echo "FAIL: iOS root $real has uncommitted or untracked changes: refused" >&2; return 1; }
+	# (5) full HEAD hash for the receipt
+	head="$(git -C "$real" rev-parse HEAD 2>/dev/null)" && [[ -n "$head" ]] || { echo "FAIL: cannot read HEAD of $real: refused" >&2; return 1; }
+	echo "iOS repository identity: OK root=$real common-dir=$common HEAD=$head"
+	return 0
+}
+ios_mode() {
+	local IOS_ROOT="" RES="" SHA_IN="" VER_IN="" ZIP_PATH="" DELEG_JSON="" DRC=0 ZSHA="" DVER=""
+	local PASS=() ART=() HAS_APPROVED=0 TMPD="" FILE_SHA=""
+	local SELF="$SCRIPT_DIR/verify-shell-pwa-version.sh"
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--ios-root) need_arg "$1" "${2-}"; IOS_ROOT="$2"; shift 2 ;;
+			--resources) need_arg "$1" "${2-}"; RES="$2"; shift 2 ;;
+			--sha256) need_arg "$1" "${2-}"; SHA_IN="$2"; shift 2 ;;
+			--ver) need_arg "$1" "${2-}"; VER_IN="$2"; shift 2 ;;
+			--unreleased-test) PASS+=("$1"); shift ;;
+			--approved-ver|--approved-sha|--approval) need_arg "$1" "${2-}"; HAS_APPROVED=1; PASS+=("$1" "$2"); shift 2 ;;
+			--freeze-manifest|--approval-dir|--qa-manifest|--released-url|--released-ver|--released-sha|--released-source)
+				need_arg "$1" "${2-}"; PASS+=("$1" "$2"); shift 2 ;;
+			--*) echo "error: unknown option $1" >&2; exit 2 ;;
+			*) ART+=("$1"); shift ;;
+		esac
+	done
+	[[ -n "$IOS_ROOT" ]] || { echo "error: $MODE needs --ios-root DIR (the iOS repository root, pinned in the caller)" >&2; exit 2; }
+	ios_identity_check "$IOS_ROOT" || exit 1
+	# unreleased test builds above the released version need a freeze or QA manifest
+	if [[ " ${PASS[*]+${PASS[*]}} " == *" --unreleased-test "* ]] && [[ " ${PASS[*]+${PASS[*]}} " != *" --freeze-manifest "* && " ${PASS[*]+${PASS[*]}} " != *" --qa-manifest "* ]]; then
+		echo "FAIL: --unreleased-test needs --freeze-manifest or --qa-manifest in an iOS mode" >&2; exit 1
+	fi
+	[[ -d "$IOS_ROOT" ]] || { echo "FAIL: iOS root not found: $IOS_ROOT" >&2; exit 1; }
+	# dependency self-check: the iOS single-ZIP gate must be the reviewed file (sha256 pinned)
+	# the iOS repository copy is the authority for the iOS single-ZIP gate
+	# the delegated check module is pinned too: its reviewed sha256
+	local DMOD="$SCRIPT_DIR/verify-delegated-freeze.py"
+	[[ "$(shasum -a 256 "$DMOD" 2>/dev/null | awk '{print $1}')" == "26a43f7f19c3557bb673215815ffdf2a905aed70db2a2c560b4fe5e8c555b270" ]] \
+		|| { echo "FAIL: verify-delegated-freeze.py is not the pinned value (build refused)" >&2; exit 1; }
+	local IOSZ="$IOS_ROOT/scripts/verify-ios-single-zip.sh"
+	[[ -f "$IOSZ" ]] || { echo "FAIL: dependency missing: $IOSZ (build refused)" >&2; exit 1; }
+	local IOSZ_SHA; IOSZ_SHA="$(shasum -a 256 "$IOSZ" | awk '{print $1}')"
+	[[ "$IOSZ_SHA" == "990cb82bbc69949d5fb5606722e6c5e3f32d3d22015f011aad0606ed1bbb3a6a" ]] \
+		|| { echo "FAIL: verify-ios-single-zip.sh sha256 $IOSZ_SHA is not the pinned value (build refused)" >&2; exit 1; }
+	if [[ "$MODE" == ios-prebuild ]]; then
+		[[ -n "$RES" && -d "$RES" ]] || { echo "error: ios-prebuild needs --resources DIR (existing folder)" >&2; exit 2; }
+		ZIP_PATH="$RES/SilentPassUI.zip"
+	else
+		[[ ${#ART[@]} -ge 1 ]] || { echo "error: ios-artifact needs at least one .app or .xcarchive (.ipa is refused until post is hardened)" >&2; exit 2; }
+		TMPD="$(mktemp -d "${TMPDIR:-/tmp}/verify-ios-art.XXXXXX")"
+		trap 'rm -rf "$TMPD"' EXIT
+		ZSHA=""
+		for a in ${ART[@]+"${ART[@]}"}; do
+			a="${a%/}"
+			out="$TMPD/$(basename "$a").SilentPassUI.zip"
+			got="$(python3 -I - "$a" "$out" <<'PYX'
+import glob, hashlib, os, sys
+art, out = sys.argv[1], sys.argv[2]
+# Independent full-tree stray scan: the whole artifact is walked here, not left to the post step.
+# Every regular file that is a ZIP (name or PK magic) must be the one fixed-path SilentPassUI.zip; symlinks are refused.
+def tree_zip_scan(root, fixed):
+    hits, links, errs = [], [], []
+    for dp, dn, fn in os.walk(root, followlinks=False, onerror=lambda e: errs.append(str(e))):
+        for n in dn + fn:
+            full = os.path.join(dp, n)
+            if os.path.islink(full):
+                links.append(full)
+        for n in fn:
+            full = os.path.join(dp, n)
+            if os.path.islink(full):
+                continue
+            with open(full, "rb") as fh:
+                head = fh.read(4)
+            if n.lower().endswith(".zip") or head in (b"PK\x03\x04", b"PK\x05\x06"):
+                hits.append(full)
+    if errs:
+        return "cannot enumerate the artifact (unreadable folder): " + errs[0]
+    if links:
+        return "symlink inside the artifact refused: " + links[0]
+    if [h for h in hits] != [fixed]:
+        return "stray or missing ZIP in the artifact (expected only the fixed-path SilentPassUI.zip): " + ", ".join(sorted(hits))
+    return None
+if art.lower().endswith(".ipa"):
+    print("REFUSE .ipa is refused until verify-ios-single-zip.sh post extracts only the required member"); sys.exit(0)
+if art.lower().endswith(".app") and os.path.isdir(art):
+    cands = [os.path.join(art, "SilentPassUI.zip")]
+elif art.lower().endswith(".xcarchive") and os.path.isdir(art):
+    apps = sorted(glob.glob(os.path.join(art, "Products", "Applications", "*.app")))
+    if len(apps) != 1:
+        print(f"REFUSE xcarchive must contain exactly one .app (found {len(apps)})"); sys.exit(0)
+    cands = [os.path.join(apps[0], "SilentPassUI.zip")]
+else:
+    print("REFUSE artifact must be an existing .app or .xcarchive directory"); sys.exit(0)
+c = [p for p in cands if os.path.isfile(p) and not os.path.islink(p)]
+if len(c) != 1:
+    print("REFUSE embedded SilentPassUI.zip missing or not a regular file at the fixed load path"); sys.exit(0)
+root = art if os.path.isdir(art) else None
+if art.lower().endswith(".xcarchive"):
+    root = art
+err = tree_zip_scan(root, c[0]) if root else "not a directory"
+if err:
+    print("REFUSE " + err); sys.exit(0)
+data = open(c[0], "rb").read()
+open(out, "wb").write(data)
+print(hashlib.sha256(data).hexdigest())
+PYX
+)"
+			case "$got" in
+				REFUSE*) echo "FAIL: $a: ${got#REFUSE }" >&2; exit 1 ;;
+			esac
+			if [[ -z "$ZSHA" ]]; then ZSHA="$got"; elif [[ "$ZSHA" != "$got" ]]; then
+				echo "FAIL: artifacts embed different ZIPs ($ZSHA vs $got): one release per call" >&2; exit 1
+			fi
+			ZIP_PATH="$out"
+		done
+	fi
+	[[ -f "$ZIP_PATH" ]] || { echo "FAIL: ZIP not found: $ZIP_PATH" >&2; exit 1; }
+	FILE_SHA="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
+	# the ZIP's own version (its update.json). Always taken from the ZIP; --ver, when given, must equal it.
+	ZVER="$(python3 -I - "$ZIP_PATH" <<'PYV'
+import json, sys, zipfile
+try:
+    print(json.loads(zipfile.ZipFile(sys.argv[1]).read("update.json").decode("utf-8")).get("ver", ""))
+except Exception:
+    print("")
+PYV
+)"
+	[[ "$ZVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FAIL: the ZIP has no readable X.Y.Z version in update.json" >&2; exit 1; }
+	[[ -z "$VER_IN" || "$VER_IN" == "$ZVER" ]] || { echo "FAIL: --ver $VER_IN does not match the ZIP version $ZVER" >&2; exit 1; }
+	[[ -z "$SHA_IN" || "$SHA_IN" == "$FILE_SHA" ]] || { echo "FAIL: --sha256 does not match the ZIP bytes" >&2; exit 1; }
+	# QA-only branch: a QA manifest given explicitly skips the DELEGATED judgement only.
+	# The single-ZIP gate, the ZIP/QA-manifest hash binding and the ZIP's own version still run. The result is never a formal
+	# pass: exit 4 with "QA ONLY - NOT FROZEN". A frozen root manifest is ignored here (no mixing of the two paths).
+	if [[ " ${PASS[*]+${PASS[*]}} " == *" --qa-manifest "* ]]; then
+		[[ " ${PASS[*]+${PASS[*]}} " != *" --freeze-manifest "* ]] || { echo "FAIL: --qa-manifest and --freeze-manifest cannot be combined" >&2; exit 1; }
+		[[ $HAS_APPROVED -eq 0 ]] || { echo "FAIL: --qa-manifest cannot be combined with --approved-*" >&2; exit 1; }
+		set +e
+		"$SELF" zip "$ZIP_PATH" ${PASS[@]+"${PASS[@]}"} --unreleased-test
+		QRC=$?
+		set -e
+		[[ $QRC -eq 4 ]] || { echo "RESULT: FAIL (QA manifest refused; not a QA pass)" >&2; exit 1; }
+		set +e
+		if [[ "$MODE" == ios-prebuild ]]; then
+			"$IOSZ" pre --resources "$RES" --sha256 "$FILE_SHA" --ver "$ZVER"
+		else
+			"$IOSZ" post --sha256 "$FILE_SHA" --ver "$ZVER" ${ART[@]+"${ART[@]}"}
+		fi
+		IRC=$?
+		set -e
+		[[ $IRC -eq 0 ]] || { echo "RESULT: FAIL (iOS single-ZIP gate, QA path)" >&2; exit 1; }
+		echo "RESULT: QA ONLY - NOT FROZEN (--qa-manifest; not_for_release; not a delegated freeze; never a formal pass)"
+		exit 4
+	fi
+	# 1. delegated check (exit 0 PASS, 1 REFUSED, 3 NO DELEGATION)
+	set +e
+	DELEG_JSON="$(python3 -I "$SCRIPT_DIR/verify-delegated-freeze.py" --shell ios --shell-root "$IOS_ROOT" --zip "$ZIP_PATH")"
+	DRC=$?
+	set -e
+	echo "==> delegated freeze check: $DELEG_JSON"
+	if [[ $DRC -eq 1 ]]; then echo "RESULT: FAIL (delegated freeze refused)" >&2; exit 1; fi
+	if [[ $DRC -eq 0 ]]; then
+		[[ $HAS_APPROVED -eq 0 ]] || { echo "FAIL: a delegated freeze and --approved-* cannot be used together" >&2; exit 1; }
+		DVER="$(printf '%s' "$DELEG_JSON" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+		DSHA="$(printf '%s' "$DELEG_JSON" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["approval_txt_sha256"])')"
+		"$SELF" zip "$ZIP_PATH" --approved-ver "$DVER" --approved-sha "$FILE_SHA" --approval "PM DELEGATED FREEZE approval_txt_sha256=$DSHA" || { echo "RESULT: FAIL (released-version gate)" >&2; exit 1; }
+	else
+		# no delegation: the owner / unreleased rules, passed through to this script's zip mode
+		"$SELF" zip "$ZIP_PATH" ${PASS[@]+"${PASS[@]}"} || { echo "RESULT: FAIL (released-version gate)" >&2; exit 1; }
+		DVER="$ZVER"
+	fi
+	[[ -z "$VER_IN" || -z "$DVER" || "$VER_IN" == "$DVER" ]] || { echo "FAIL: --ver $VER_IN does not match the ZIP version $DVER" >&2; exit 1; }
+	# 2. the iOS single-ZIP gate (pre on the resource folder, post on the artifacts)
+	if [[ "$MODE" == ios-prebuild ]]; then
+		exec "$IOSZ" pre --resources "$RES" --sha256 "$FILE_SHA" --ver "${DVER:-$VER_IN}"
+	else
+		exec "$IOSZ" post --sha256 "$FILE_SHA" --ver "${DVER:-$VER_IN}" ${ART[@]+"${ART[@]}"}
+	fi
+}
+if [[ "$MODE" == ios-prebuild || "$MODE" == ios-artifact ]]; then
+	ios_mode "$@"
+fi
+
+URL="https://beamio.ca/app/update.json"  # strict TLS
 RVER="" RSHA="" RSRC="" TEST=0 AVER="" ASHA="" AREF="" FMAN="" APPR="" QMAN=""
 APP_DIR="$REPO_ROOT/src/CaehTrees/app"
 FILES=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		--released-url) URL="${2:?}"; shift 2 ;;
-		--released-ver) RVER="${2:?}"; shift 2 ;;
-		--released-sha) RSHA="${2:?}"; shift 2 ;;
-		--released-source) RSRC="${2:?}"; shift 2 ;;
+		--released-url) need_arg "$1" "${2-}"; URL="$2"; shift 2 ;;
+		--released-ver) need_arg "$1" "${2-}"; RVER="$2"; shift 2 ;;
+		--released-sha) need_arg "$1" "${2-}"; RSHA="$2"; shift 2 ;;
+		--released-source) need_arg "$1" "${2-}"; RSRC="$2"; shift 2 ;;
 		--unreleased-test) TEST=1; shift ;;
-		--approved-ver) AVER="${2:?}"; shift 2 ;;
-		--approved-sha) ASHA="${2:?}"; shift 2 ;;
-		--approval) AREF="${2:?}"; shift 2 ;;
-		--freeze-manifest) FMAN="${2:?}"; shift 2 ;;
-		--approval-dir) APPR="${2:?}"; shift 2 ;;
-		--qa-manifest) QMAN="${2:?}"; shift 2 ;;
-		--app-dir) APP_DIR="${2:?}"; shift 2 ;;
+		--approved-ver) need_arg "$1" "${2-}"; AVER="$2"; shift 2 ;;
+		--approved-sha) need_arg "$1" "${2-}"; ASHA="$2"; shift 2 ;;
+		--approval) need_arg "$1" "${2-}"; AREF="$2"; shift 2 ;;
+		--freeze-manifest) need_arg "$1" "${2-}"; FMAN="$2"; shift 2 ;;
+		--approval-dir) need_arg "$1" "${2-}"; APPR="$2"; shift 2 ;;
+		--qa-manifest) need_arg "$1" "${2-}"; QMAN="$2"; shift 2 ;;
+		--app-dir) need_arg "$1" "${2-}"; APP_DIR="$2"; shift 2 ;;
 		-h|--help) usage ;;
 		--*) echo "error: unknown option $1" >&2; exit 2 ;;
 		*) FILES+=("$1"); shift ;;
@@ -103,11 +352,47 @@ case "$MODE" in
 	android-prebuild) FILES=("$APP_DIR/src/main/assets/SilentPassUI.zip") ;;
 esac
 
+# --- Android delegated check: the same authority as the iOS modes, before the released-version rules.
+# The Gradle call site is unchanged; the shell root is the parent of the app folder (manifest at <root>/app/pwa-freeze-manifest.json).
+# PASS sets the approved triple for the existing rules below; NO DELEGATION leaves the owner/unreleased path unchanged; REFUSED fails.
+if [[ "$MODE" == android-prebuild || "$MODE" == android-artifact ]]; then
+	DMOD="$SCRIPT_DIR/verify-delegated-freeze.py"
+	[[ "$(shasum -a 256 "$DMOD" 2>/dev/null | awk '{print $1}')" == "26a43f7f19c3557bb673215815ffdf2a905aed70db2a2c560b4fe5e8c555b270" ]] \
+		|| { echo "FAIL: verify-delegated-freeze.py is not the pinned value (build refused)" >&2; exit 1; }
+	ANDROID_ROOT="$(cd "$APP_DIR/.." && pwd -P)"
+	DZIP=""
+	if [[ "$MODE" == android-prebuild ]]; then
+		DZIP="${FILES[0]}"
+	else
+		DTMP="$(mktemp -d "${TMPDIR:-/tmp}/verify-android-deleg.XXXXXX")"
+		DZIP="$DTMP/SilentPassUI.zip"
+		python3 -I - "${FILES[0]}" "$DZIP" <<'PYA' || { rm -rf "$DTMP"; echo "FAIL: cannot read the embedded ZIP from ${FILES[0]} (refused)" >&2; exit 1; }
+import sys, zipfile
+p, out = sys.argv[1], sys.argv[2]
+z = zipfile.ZipFile(p)
+n = "base/assets/SilentPassUI.zip" if p.lower().endswith(".aab") else "assets/SilentPassUI.zip"
+open(out, "wb").write(z.read(n))
+PYA
+	fi
+	set +e
+	DJSON="$(python3 -I "$DMOD" --shell android --shell-root "$ANDROID_ROOT" --zip "$DZIP")"
+	DRC=$?
+	set -e
+	[[ "$MODE" == android-artifact ]] && rm -rf "${DTMP:-}"
+	echo "==> delegated freeze check (android): $DJSON"
+	if [[ $DRC -eq 1 ]]; then echo "RESULT: FAIL (delegated freeze refused)" >&2; exit 1; fi
+	if [[ $DRC -eq 0 ]]; then
+		[[ -z "$AVER$ASHA$AREF" ]] || { echo "FAIL: a delegated freeze and --approved-* cannot be used together" >&2; exit 1; }
+		AVER="$(printf '%s' "$DJSON" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+		ASHA="$(printf '%s' "$DJSON" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["zip_sha256"])')"
+		AREF="PM DELEGATED FREEZE approval_txt_sha256=$(printf '%s' "$DJSON" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["approval_txt_sha256"])')"
+	fi
+fi
 set +e
 export PWA_FREEZE_MANIFEST="$FMAN"
 export PWA_FREEZE_APPROVAL_DIR="$APPR"
 export PWA_QA_MANIFEST="$QMAN"
-python3 -I - "$MODE" "$URL" "$RVER" "$RSHA" "$RSRC" "$TEST" "$AVER" "$ASHA" "$AREF" "${FILES[@]}" <<'PY'
+python3 -I - "$MODE" "$URL" "$RVER" "$RSHA" "$RSRC" "$TEST" "$AVER" "$ASHA" "$AREF" ${FILES[@]+"${FILES[@]}"} <<'PY'
 import hashlib, io, json, os, re, sys, time, urllib.request, zipfile
 mode, url, rver, rsha, rsrc, test, aver, asha, aref = sys.argv[1:10]
 files = sys.argv[10:]
@@ -119,7 +404,7 @@ VOID = {
     "005baca0d6992bf4779ff9bef0335a06fdd2ad978c5896c0f8f9db08c1568517": "0.52.932 non-clean build, withdrawn",
 }
 # Freeze manifest (pwa-version-ledger): the one frozen, not-yet-released build allowed above released.
-# Accepted only when every check below passes; each refusal is printed with its reason (PM R495, R498, R503).
+# Accepted only when every check below passes; each refusal is printed with its reason .
 #   - every field the gate reads must be present and exactly as written: status "frozen"; not_frozen JSON false;
 #     freeze_kind "owner-freeze"; release_state "frozen-owner-approved"; approved_by "project-owner"; version X.Y.Z;
 #     zip_sha256 64 lowercase hex; void a list of 64-hex strings; owner_freeze_approval a bare file name.
@@ -236,7 +521,7 @@ if _fm:
     FROZEN = (_m["version"], _m["zip_sha256"])
     for _h in _m["void"]: VOID[_h] = f"voided in {os.path.basename(_fm)}"
     print(f"freeze manifest: ver={FROZEN[0]} sha256={FROZEN[1]} ({os.path.basename(_fm)}) - all freeze conditions met")
-# QA candidate manifest (PM R495, R509 option (a)): with --unreleased-test only. It binds ONE ZIP by its version and sha256 and says
+# QA candidate manifest: with --unreleased-test only. It binds ONE ZIP by its version and sha256 and says
 # nothing else: the verdict is QA, NOT FROZEN. It is never a freeze, never a formal package, and never read by --freeze-manifest.
 QA = None
 QA_FREEZE_KIND = "qa-candidate-not-frozen"
@@ -403,12 +688,28 @@ for f in files:
     for name, data in found:
         check_zip(name, data)
 
-print(("RESULT: FAIL (%d problem(s))" % len(errors)) if errors else "RESULT: PASS (version gate)")
-sys.exit(1 if errors else 0)
+# A QA-only result is exit 4 with one label, in every mode. A formal pass stays exit 0.
+if errors:
+    print("RESULT: FAIL (%d problem(s))" % len(errors)); sys.exit(1)
+if QA:
+    # the single RESULT line for zip mode; the android chain prints its own final line (one QA conclusion per run)
+    if mode == "zip":
+        print("RESULT: QA ONLY - NOT FROZEN (exit 4; not_for_release; never a formal pass)")
+    else:
+        print("QA manifest checked: hash and single ZIP bound; the chain below decides the final result")
+    sys.exit(4)
+print("RESULT: PASS (version gate)"); sys.exit(0)
 PY
 rc=$?
 set -e
-[[ $rc -eq 0 ]] || exit $rc
+# QA (exit 4) continues into the Android single-ZIP gate for android modes: the single-ZIP gate must run
+# on a QA candidate too, and its own failure wins. A QA result is returned at the end as exit 4, never as a formal pass.
+ANDROID_QA=0
+if [[ $rc -eq 4 && "$MODE" != zip ]]; then
+	ANDROID_QA=1
+elif [[ $rc -ne 0 ]]; then
+	exit $rc
+fi
 
 # 3. chain into the existing single-ZIP gate with the embedded ZIP's own hash
 if [[ "$MODE" != zip ]]; then
@@ -429,9 +730,17 @@ PY
 		echo "RESULT: FAIL (gate script missing)" >&2
 		exit 1
 	fi
+	ARC=0
 	if [[ "$MODE" == android-prebuild ]]; then
-		exec "$SCRIPT_DIR/verify-android-single-zip.sh" prebuild --app-dir "$APP_DIR" --sha256 "$ZSHA"
+		"$SCRIPT_DIR/verify-android-single-zip.sh" prebuild --app-dir "$APP_DIR" --sha256 "$ZSHA" || ARC=$?
 	else
-		exec "$SCRIPT_DIR/verify-android-single-zip.sh" artifact --sha256 "$ZSHA" "${FILES[@]}"
+		"$SCRIPT_DIR/verify-android-single-zip.sh" artifact --sha256 "$ZSHA" ${FILES[@]+"${FILES[@]}"} || ARC=$?
 	fi
+	# the single-ZIP gate's failure always wins; a QA candidate that passes the single-ZIP gate is exit 4, a formal pass exit 0
+	[[ $ARC -eq 0 ]] || exit $ARC
+	if [[ $ANDROID_QA -eq 1 ]]; then
+		echo "RESULT: QA ONLY - NOT FROZEN (exit 4; the Android single-ZIP gate passed; never a formal pass)"
+		exit 4
+	fi
+	exit 0
 fi

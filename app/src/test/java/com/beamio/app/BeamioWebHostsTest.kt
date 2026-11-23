@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** PM R1626/R1637: the shell uses beamio.ca, exact host names only, strict TLS, no fallback. */
+/**: the shell uses beamio.ca, exact host names only, strict TLS, no fallback. */
 class BeamioWebHostsTest {
     @Test
     fun onlyTheExactNewHostsAreWebHosts() {
@@ -19,7 +19,7 @@ class BeamioWebHostsTest {
 
     private fun mainCode(): List<String> =
         File("src/main/java/com/beamio/app").walkTopDown().filter { it.isFile && it.extension == "kt" && it.name != "BeamioWebHosts.kt" && it.name != "BeamioNfcSunBlock.kt" &&
-            it.name != "LegacyBeamioHostGuard.kt" /* the one place that recognises the legacy host (PM 2026-11-17) */ }
+            it.name != "LegacyBeamioHostGuard.kt" /* the one place that recognises the legacy host (2026-11-17) */ }
             .flatMap { f -> f.readLines().mapIndexed { i, l -> "${f.name}:${i + 1}: $l" } }
             .filterNot { it.substringAfter(": ").trimStart().let { s -> s.startsWith("*") || s.startsWith("//") || s.startsWith("/*") } }
             .toList()
@@ -50,7 +50,7 @@ class BeamioWebHostsTest {
         assertEquals("https://appassets.androidplatform.net", com.beamio.app.embedded.EmbeddedPwaConstants.ASSET_LOADER_ORIGIN)
     }
 
-    /** PM R2030: the store gate looks for the live update URL (beamio.ca), not only the old domain's. */
+    /**: the store gate looks for the live update URL (beamio.ca), not only the old domain's. */
     @Test
     fun storeGateCoversTheLiveUpdateUrl() {
         val gate = File("../scripts/verify-android-store-no-ota.sh").readText()
@@ -59,7 +59,7 @@ class BeamioWebHostsTest {
         assertTrue(strings.contains("\"beamio.app/app/update.json\""))
     }
 
-    /** PM R2030: no README or main-code link points at the old site as the live app address. */
+    /**: no README or main-code link points at the old site as the live app address. */
     @Test
     fun readmeNamesTheLiveDomain() {
         val readme = File("../README.md").readText()
@@ -67,7 +67,7 @@ class BeamioWebHostsTest {
         assertTrue(readme.contains("https://beamio.ca/app"))
     }
 
-    /** PM R2040: the SDK's old-domain default apiBaseUrl is never used: the shell fills or moves it in a page init. */
+    /**: the SDK's old-domain default apiBaseUrl is never used: the shell fills or moves it in a page init. */
     @Test
     fun chatApiBaseNeverFallsBackToTheOldDomain() {
         assertEquals("https://beamio.ca/api", BeamioWebHosts.chatApiBaseFor(null))
@@ -86,7 +86,7 @@ class BeamioWebHostsTest {
         assertTrue(h.indexOf("chatApiBaseFor(") < h.indexOf("BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))"))
     }
 
-    /** PM R2120: the legacy chatModuleSignResponse never accepts a signing reply, even in a legacy QA probe. */
+    /**: the legacy chatModuleSignResponse never accepts a signing reply, even in a legacy QA probe. */
     @Test
     fun legacySignResponseIsAlwaysRefused() {
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()

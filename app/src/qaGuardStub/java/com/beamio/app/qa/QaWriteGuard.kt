@@ -7,7 +7,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 
 /**
- * Release and store builds (PM R675): a no-op with the same calls as the debug write guard (src/debug). It holds no host
+ * Release and store builds: a no-op with the same calls as the debug write guard (src/debug). It holds no host
  * list, page script, JS interface or probe receiver, so none of that is compiled into a release artifact.
  */
 object QaWriteGuard {

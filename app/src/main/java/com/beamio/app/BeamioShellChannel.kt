@@ -11,7 +11,7 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 
 /**
- * `window.BeamioShell` (PM R766/R771/R789, spec §25.22.1, §25.52CT.4, §25.52CV.2; message format proposed by the
+ * `window.BeamioShell` (spec §25.22.1, §25.52CT.4, §25.52CV.2; message format proposed by the
  * Android shell, to be written into the spec): the sensitive CashTreesAndroid methods (keys, identity, files, external
  * links, payment, camera, microphone) moved off addJavascriptInterface onto WebViewCompat.addWebMessageListener with the
  * only allowed origin https://appassets.androidplatform.net, main frame only. Same mechanism as window.BeamioChat
@@ -67,7 +67,11 @@ object BeamioShellChannel {
         "startSystemCall" to Arg.JSON,
         "reportIncomingSystemCall" to Arg.JSON,
         "endSystemCall" to Arg.JSON,
-        // call metadata and audio routing (PM R820)
+        "nativeIdentityCheck" to Arg.JSON,
+        "uiLockState" to Arg.JSON,
+        "incomingCallUnlockShown" to Arg.JSON,
+        "dismissIncomingSystemCall" to Arg.JSON,
+        // call metadata and audio routing
         "queryIncomingCallOutcome" to Arg.JSON,
         "notifyVoiceMicReady" to Arg.JSON,
         // microphone
@@ -77,17 +81,32 @@ object BeamioShellChannel {
 
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
-    /** [onCall] runs on the main thread and returns the ack to send. */
-    fun attach(webView: WebView, onCall: (Decision.Call) -> JSONObject) {
+    /** Off-main work for the no-key gate (SDK vault reads). One thread, in arrival order. */
+    private val gateExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "beamio-shell-gate").apply { isDaemon = true } }
+    }
+
+    /** The no-key gate answer for [action], or null. Passed to [attach]'s callback so the callback needs no SDK read on main. */
+    var gateFor: (String) -> String? = { _ -> null }
+
+    /** [onCall] runs on the main thread with the gate answer computed off it, and returns the ack to send. */
+    fun attach(webView: WebView, onCall: (Decision.Call, String?) -> JSONObject) {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         WebViewCompat.addWebMessageListener(webView, JS_NAME, setOf(ChatOriginGate.TRUSTED)) { _: WebView, message: WebMessageCompat, sourceOrigin: Uri, isMainFrame: Boolean, reply: JavaScriptReplyProxy ->
             val data = if (message.type == WebMessageCompat.TYPE_STRING) runCatching { message.data }.getOrNull() else null
             val post: (JSONObject) -> Unit = { o -> main.post { runCatching { reply.postMessage(o.toString()) } } }
             when (val d = decide(data, sourceOrigin.toString(), isMainFrame)) {
                 is Decision.Answer -> post(d.ack)
-                is Decision.Call -> main.post {
-                    val ack = runCatching { onCall(d) }.getOrElse { ack(d.action, d.reqId).put("ok", false).put("error", "internal_error") }
-                    runCatching { reply.postMessage(ack.toString()) }
+                is Decision.Call -> {
+                    // ANR fix (S25 176, 2026-11-17): the no-key gate reads the SDK vault (keystore). It is computed off the main thread;
+                    // the call itself still runs on main, with the gate result passed in. A failed read stays internal_error.
+                    gateExecutor.execute {
+                        val gate = runCatching { gateFor(d.action) }
+                        main.post {
+                            val ack = runCatching { onCall(d, gate.getOrThrow()) }.getOrElse { ack(d.action, d.reqId).put("ok", false).put("error", "internal_error") }
+                            runCatching { reply.postMessage(ack.toString()) }
+                        }
+                    }
                 }
             }
         }

@@ -1,7 +1,7 @@
 package com.beamio.app
 
 /**
- * Spec r3ej §25.52CJ.3 / r3em CM.3 (PM R748/R756, scheme 2): before chatModuleCommand reaches the SDK, the shell checks
+ * Spec r3ej §25.52CJ.3 / r3em CM.3 (scheme 2): before chatModuleCommand reaches the SDK, the shell checks
  * that the top-level page of the embedded WebView is the trusted origin. JavascriptInterface calls carry no origin, so
  * the shell records the top-level URL's origin on onPageStarted/onPageFinished and compares it here.
  * Limit: a frame of another origin inside a trusted top-level page cannot be told apart (scheme 1, a WebMessageListener

@@ -225,7 +225,7 @@ class ShellRecordBridgeTest {
         assertEquals("""{"profiles":[{"keyID":"k","tokens":{"a":1},"chatManager":{"router":{},"pgpKey":{"publicKey":"Q","keyID":"K"}}}]}""", s)
     }
 
-    // ---------- R381: encrypted native copy, W class approved ----------
+    // ----------: encrypted native copy, W class approved ----------
 
     @Test
     fun encryptedStoreRoundTripAndTamperFails() {
@@ -280,10 +280,10 @@ class ShellRecordBridgeTest {
         assertFalse(text.contains("PGP PRIVATE KEY"))
         assertTrue(text.contains("PGP PUBLIC KEY"))
         assertEquals(1, out.getJSONObject("record").getInt("rev"))
-        assertTrue(out.getJSONObject("record").getJSONArray("profiles").getJSONObject(0).has("privateKeyArmor")) // W class kept (R329/R381)
+        assertTrue(out.getJSONObject("record").getJSONArray("profiles").getJSONObject(0).has("privateKeyArmor")) // W class kept (/)
     }
 
-    /** R389: the SDK owns the page record; the shell only reads P and hands the PGP to run(source). */
+    /**: the SDK owns the page record; the shell only reads P and hands the PGP to run(source). */
     @Test
     fun startupWithoutShellStoreOnlyHandsPgpToTheSdk() {
         val p = idbDirFromFixture()
@@ -302,7 +302,7 @@ class ShellRecordBridgeTest {
         assertFalse(temp.exists())
     }
 
-    // ---------- R399: first page write to the SDK from P ----------
+    // ----------: first page write to the SDK from P ----------
 
     private class FakeImporter(var has: Boolean? = false, var answer: (String) -> PageRecordImporter.Result = { e -> PageRecordImporter.Result("ok", e) }) : PageRecordImporter {
         val payloads = ArrayList<String>(); val eoas = ArrayList<String>(); val unreadable = ArrayList<String>()

@@ -59,6 +59,13 @@ internal object BeamioIncomingRingtone {
         main.post { startOnMain(app, keys, stillRinging) }
     }
 
+    /** True when [ids] name the call that rings now (read under the lock; no side effect). */
+    fun isRingingFor(ids: Collection<String>): Boolean {
+        val keys = BeamioRingPolicy.callKeys(ids)
+        if (keys.isEmpty()) return false
+        return synchronized(lock) { BeamioRingPolicy.sameCall(ringingKeys, keys) }
+    }
+
     /** Stop only if [ids] name the call that rings now (another call's end leaves it). */
     fun stopFor(ids: Collection<String>, reason: String) {
         val keys = BeamioRingPolicy.callKeys(ids)

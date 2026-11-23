@@ -6,7 +6,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Encryption for the native page record (R381, owner: "批准加密副本"). File layout: "BSR1" | 12-byte IV | AES-GCM
+ * Encryption for the native page record (an encrypted copy is allowed). File layout: "BSR1" | 12-byte IV | AES-GCM
  * ciphertext with 128-bit tag; AAD binds the format. [Keystore] is used on devices; tests inject [Software].
  */
 interface RecordCipher {

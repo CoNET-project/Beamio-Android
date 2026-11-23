@@ -6,7 +6,7 @@ import org.junit.Test
 import java.io.File
 
 /**
- * GAP-17 (owner decision 2026-11-13): consumer binding or claiming of a physical NFC card is removed, with no
+ * GAP-17 (since 2026-11-13): consumer binding or claiming of a physical NFC card is removed, with no
  * replacement. Source checks on MainActivity (the bridge and the NFC code live there). Runtime checks are on the
  * emulator (see the receipt).
  */
@@ -79,9 +79,9 @@ class NfcCardBindRemovalTest {
         val entries = Regex("@JavascriptInterface\\s+(?:open |override )?fun (\\w+)\\(").findAll(src).map { it.groupValues[1] }.toSet()
         for (e in expected) assertTrue("missing $e", e in entries)
         assertFalse("startPhysicalCardBind" in entries || "cancelPhysicalCardBind" in entries)
-        // PM R679 / R680 (2026-11-14): removed entries
+        // (2026-11-14): removed entries
         assertFalse("setNativeChatPgpSecrets" in entries || "requestPendingSystemCallAction" in entries)
-        assertFalse("scanRecoveryQr" in entries) // PM R820
+        assertFalse("scanRecoveryQr" in entries) //
     }
 
     /** Positive regression: merchant card / coupon deep links are not part of GAP-17 and stay as they were. */

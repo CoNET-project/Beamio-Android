@@ -101,7 +101,7 @@ class NativeRecoveryTest {
         assertEquals(
             listOf("ok", "cancelled", "invalid_format", "bad_pin", "backoff", "not_found", "network_error", "already_exists",
                 "record_invalid", "write_failed", "readback_failed",
-                // SDK 0.2.11 adds legacy_record; the PWA f2b53dc0 list does not have it yet (the page ignores it).
+                // SDK 0.2.11 adds legacy_record; the PWA list does not have it yet (the page ignores it).
                 "legacy_record"),
             RecoveryCode.values().map { it.wire },
         )
@@ -148,7 +148,8 @@ class NativeRecoveryTest {
         assertTrue(main.contains("NativeRecoveryRoute.register("))
         val binding = File("src/nativekeySdk/java/com/beamio/app/nativekey/NativeKeySdkBinding.kt").readText()
         assertTrue(binding.contains("NativeRecoveryHost.launcher = { NativeRecoveryRoute.open() }"))
-        assertTrue(binding.contains("NativeImportHost.launcher = { NativeKeyImportRoute.open() }"))
+        // SDK 0.2.27 (spec r2.3 41(1)): the native import page is removed; no import launcher is set any more.
+        assertFalse(binding.contains("NativeImportHost.launcher ="))
         assertFalse(Regex("NativeRecoveryHost\\.launcher[^\\n]*Import").containsMatchIn(binding))
         val page = File("src/main/java/com/beamio/app/nativekey/NativeRecoveryActivity.kt").readText()
         assertTrue(page.contains("FLAG_SECURE") && page.contains("configureSecureInput"))

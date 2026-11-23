@@ -30,6 +30,12 @@ object BeamioNativeEthSigner {
         return ByteArray(32).also { d.doFinal(it, 0) }
     }
 
+    /** True only when [signatureHex] over EIP-191 of [message] recovers to [expectedEoa] (pre-send self-check). */
+    fun signedBy(message: String, signatureHex: String, expectedEoa: String): Boolean {
+        val recovered = recoverAddress(message, signatureHex) ?: return false
+        return expectedEoa.isNotBlank() && recovered.equals(expectedEoa.trim(), ignoreCase = true)
+    }
+
     /** EIP-55 checksummed address of a 32-byte private key (hex, optional 0x). */
     fun address(privateKeyHex: String): String? {
         val d = parseKey(privateKeyHex) ?: return null
@@ -52,6 +58,27 @@ object BeamioNativeEthSigner {
         val recId = (0..3).firstOrNull { recover(it, r, s, hash)?.equals(pub) == true } ?: return null
         val out = to32(r) + to32(s) + byteArrayOf((27 + recId).toByte())
         return "0x" + out.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * Signer address (EIP-55 lowercase not applied here) recovered from an EIP-191 signature of
+     * [message] (UTF-8) and a 65-byte `0x` r ‖ s ‖ v signature (v = 27/28 or 0/1). Null when the
+     * signature is malformed or no point recovers. Used to check the offer `from` (spec 26.3 step 1).
+     */
+    fun recoverAddress(message: String, signatureHex: String): String? {
+        val h = signatureHex.removePrefix("0x").removePrefix("0X")
+        if (h.length != 130 || !h.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return null
+        val raw = ByteArray(65) { i -> h.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+        val r = BigInteger(1, raw.copyOfRange(0, 32))
+        val s = BigInteger(1, raw.copyOfRange(32, 64))
+        var v = raw[64].toInt() and 0xff
+        if (v >= 27) v -= 27
+        if (v !in 0..1) return null
+        val bytes = message.toByteArray(Charsets.UTF_8)
+        val prefix = "\u0019Ethereum Signed Message:\n${bytes.size}".toByteArray(Charsets.UTF_8)
+        val hash = keccak256(prefix + bytes)
+        val pub = recover(v, r, s, hash) ?: return null
+        return addressOf(pub)
     }
 
     private fun parseKey(hex: String): BigInteger? {

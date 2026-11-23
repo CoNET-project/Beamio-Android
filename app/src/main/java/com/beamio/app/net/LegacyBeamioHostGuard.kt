@@ -10,7 +10,7 @@ import java.net.SocketAddress
 import java.net.URI
 
 /**
- * PM 2026-11-17: beamio.app (and www / subdomains) is a third-party parking host. Until the OTA to 0.52.933 has run, no request to it
+ * 2026-11-17: beamio.app (and www / subdomains) is a third-party parking host. Until the OTA to 0.52.933 has run, no request to it
  * may leave the device with wallet or address data.
  *
  * - WebView (page) requests: [blockedResponse] answers 403 with an empty body; nothing is forwarded.

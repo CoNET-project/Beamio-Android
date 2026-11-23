@@ -38,7 +38,7 @@ open class EmbeddedPwaBundleStore internal constructor(
 ) {
     constructor(context: Context, remotePwaUpdate: Boolean, expectedZipSha256: String?) : this(
         rootDir = File(context.applicationContext.filesDir, EmbeddedPwaConstants.ROOT_DIR_NAME),
-        // QaBootstrapFaults: debug-only fault injection for isolated acceptance (PM R1595); a plain pass-through in release/store.
+        // QaBootstrapFaults: debug-only fault injection for isolated acceptance; a plain pass-through in release/store.
         openBundledZip = com.beamio.app.qa.QaBootstrapFaults.wrapBundledZip(context) {
             context.applicationContext.assets.open(EmbeddedPwaConstants.BUNDLE_ASSET_NAME)
         },
@@ -88,7 +88,7 @@ open class EmbeddedPwaBundleStore internal constructor(
                     }
                 }
             } catch (e: Exception) {
-                // PM R1574 (same class as POS (d)): reading the APK zip failed. A complete, embedded-path active/ is still
+                // (same class as POS (d)): reading the APK zip failed. A complete, embedded-path active/ is still
                 // a working local UI: keep and load it; nothing is deleted. Without one, fail (the caller shows the retry page).
                 bundledDir.deleteRecursively()
                 if (hasCompleteBundle(activeDir) && usesEmbeddedAssetPaths(activeDir)) {
@@ -104,7 +104,7 @@ open class EmbeddedPwaBundleStore internal constructor(
                 if (hasCompleteBundle(activeDir)) return
                 throw IllegalStateException("Bundled SilentPassUI.zip did not contain index.html")
             }
-            // PM R1574: an active/ whose index.html names scripts that are missing is not valid (it renders a blank page).
+            // an active/ whose index.html names scripts that are missing is not valid (it renders a blank page).
             val activeIsValid = hasCompleteBundle(activeDir)
             if (!usesEmbeddedAssetPaths(bundledDir)) {
                 // Keep whatever is active so a later OTA can still repair it.
@@ -192,7 +192,7 @@ open class EmbeddedPwaBundleStore internal constructor(
             }
         } catch (e: Exception) {
             bundledDir.deleteRecursively()
-            // PM R1574: the APK zip could not be read this time. Load active/ only if it is provably the content this same
+            // the APK zip could not be read this time. Load active/ only if it is provably the content this same
             // APK zip (expectedZipSha256) produced on an earlier start: both markers match and its files hash to the
             // recorded content digest, with no missing script. Otherwise nothing is loaded. Nothing is deleted either way.
             if (activeVerifiedForExpectedZipLocked()) {
@@ -260,7 +260,7 @@ open class EmbeddedPwaBundleStore internal constructor(
     }
 
     /**
-     * Called after the store bootstrap replaced `active/`; does nothing in the app. PM R900 (same rule as iOS
+ * Called after the store bootstrap replaced `active/`; does nothing in the app. (same rule as iOS
      * BEAMIO_TEST_HOOKS): the unit-test hook that simulates on-disk corruption lives only in the test source set, in a
      * subclass that overrides this method; release and store contain no test hook.
      */
@@ -305,7 +305,7 @@ open class EmbeddedPwaBundleStore internal constructor(
     fun activeVersion(): String? = readUpdateInfo(activeDir)?.ver
 
     /**
-     * Spec r3oj §25.52Y.38 item 2 (h) (PM R1908, R1920): a downloaded bundle is staged only when every byte of [zipFile]
+ * Spec r3oj §25.52Y.38 item 2 (h): a downloaded bundle is staged only when every byte of [zipFile]
      * hashes to [expectedZipSha256], the `zip_sha256` of the published update.json. Missing or different: nothing is
      * staged (not loaded). After staging, its content digest is recorded outside staging/ and active/ (B5 record) so the
      * trust check can match it when it becomes active.
@@ -365,7 +365,7 @@ open class EmbeddedPwaBundleStore internal constructor(
                 pendingVersion = null
                 throw webBuildError("Staged bundle")
             }
-            // Only upgrades (PM 2026-11-17, review 76706f6d): a staged bundle that is not strictly newer than the active one
+            // Only upgrades (2026-11-17): a staged bundle that is not strictly newer than the active one
             // is discarded, never promoted. A downgrade must not reach the page through the bridge.
             val stagedVersion = readUpdateInfo(stagingDir)?.ver ?: throw IllegalStateException("Staged bundle has no version")
             // An unknown active version refuses the promotion (the staged bundle is discarded). A broken active is repaired
@@ -480,7 +480,7 @@ open class EmbeddedPwaBundleStore internal constructor(
     }
 
     /**
-     * PM R1574: true when active/ is provably what this APK's bundled zip produced: `.loaded-sha256` equals
+ *true when active/ is provably what this APK's bundled zip produced: `.loaded-sha256` equals
      * [expectedZipSha256], `.loaded-content-sha256` equals the current content digest of active/, and no script named by
      * index.html is missing.
      */
@@ -512,7 +512,7 @@ open class EmbeddedPwaBundleStore internal constructor(
     private fun hasValidBundle(dir: File): Boolean =
         File(dir, "index.html").isFile
 
-    /** PM R1574: [hasValidBundle] and every local script named by index.html exists (a missing script renders blank). */
+    /**: [hasValidBundle] and every local script named by index.html exists (a missing script renders blank). */
     internal fun hasCompleteBundle(dir: File): Boolean = hasValidBundle(dir) && missingScripts(dir).isEmpty()
 
     /** Local `<script src>` paths of index.html that are not files under [dir] (absolute URLs are ignored). */
@@ -573,7 +573,7 @@ open class EmbeddedPwaBundleStore internal constructor(
         return "entries bundled=${expected.size} active=${actual.size} onlyBundled=$missing onlyActive=$extra"
     }
 
-    /** "path\u0000sha" -> "path sha8…" for logs (PM R848: no full-length digest in shell logs). */
+    /** "path\u0000sha" -> "path sha8…" for logs (no full-length digest in shell logs). */
     private fun shortEntry(line: String): String {
         val i = line.indexOf('\u0000')
         return if (i < 0) line else line.substring(0, i) + " " + shortDigest(line.substring(i + 1))
@@ -631,7 +631,7 @@ open class EmbeddedPwaBundleStore internal constructor(
         /** Written into `active/` by the store bootstrap: SHA-256 of the bundled zip it came from. */
         const val LOADED_SHA_MARKER = ".loaded-sha256"
 
-        /** PM R1574: content digest of active/ recorded by the store bootstrap, used only to verify active/ when the APK zip is unreadable. */
+        /**: content digest of active/ recorded by the store bootstrap, used only to verify active/ when the APK zip is unreadable. */
         const val LOADED_CONTENT_MARKER = ".loaded-content-sha256"
 
         private val SCRIPT_SRC = Regex("""<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
@@ -672,7 +672,7 @@ open class EmbeddedPwaBundleStore internal constructor(
 }
 
 /**
- * PM R848 (2026-11-14): shell logs and log-bound messages never carry a full 64-hex digest (the bundled ZIP SHA-256 and the
+ * (2026-11-14): shell logs and log-bound messages never carry a full 64-hex digest (the bundled ZIP SHA-256 and the
  * content digest change with every build and trip the T-131 LS-G1 log scan). Only the first 8 hex digits, then "…".
  */
 internal fun shortDigest(h: String?): String = if (h == null) "null" else h.take(8) + "…"

@@ -107,12 +107,15 @@ object BeamioVoiceV3 {
     /** New temporary wallet T and the payer's signature over it. Blocking. */
     fun newPaidChannel(context: Context, payerKeyHex: String, payerEoa: String): Own? {
         if (appContext == null) appContext = context.applicationContext
-        val tk = hex(randomBytes(32))
-        val temp = runCatching { BeamioNativeEthSigner.address(tk) }.getOrNull() // TEMP local integration (PM A3): native only
+        // SecureRandom failure closes the path. A zero or out-of-range scalar is refused by address() (parseKey: 0 < d < n).
+        val tkRaw = runCatching { randomBytes(32) }.getOrNull() ?: return null
+        val tk = hex(tkRaw)
+        java.util.Arrays.fill(tkRaw, 0.toByte()) // intermediate bytes cleared (String copies cannot be cleared)
+        val temp = runCatching { BeamioNativeEthSigner.address(tk) }.getOrNull() // TEMP local integration (A3): native only
             ?: return null
         val notAfter = System.currentTimeMillis() / 1000L + PAY_VALID_SEC
         val text = payText(temp, notAfter)
-        val sig = runCatching { BeamioNativeEthSigner.signEip191(payerKeyHex, text) }.getOrNull() // TEMP local integration (PM A2): no WebView fallback
+        val sig = runCatching { BeamioNativeEthSigner.signEip191(payerKeyHex, text) }.getOrNull() // TEMP local integration (A2): no WebView fallback
             ?: return null
         val pay = JSONObject()
             .put("payer", payerEoa.lowercase())
@@ -128,7 +131,7 @@ object BeamioVoiceV3 {
         if (appContext == null) appContext = context.applicationContext
         val ts = System.currentTimeMillis() / 1000L
         val text = listenText(own.channel.sid, own.channel.wkB64, relay.domain, ts)
-        val tempSig = runCatching { BeamioNativeEthSigner.signEip191(own.tkHex, text) }.getOrNull() // TEMP local integration (PM A2): no WebView fallback
+        val tempSig = runCatching { BeamioNativeEthSigner.signEip191(own.tkHex, text) }.getOrNull() // TEMP local integration (A2): no WebView fallback
             ?: return null
         val pay = runCatching { JSONObject(own.payJson) }.getOrNull() ?: return null
         return JSONObject()
@@ -168,7 +171,7 @@ object BeamioVoiceV3 {
         val tk = BeamioChatWalletKeyStore.normalizeKey(o?.optString("tk"))
         val pay = o?.optJSONObject("pay") ?: return null
         if (tk.isEmpty()) return null
-        val temp = runCatching { BeamioNativeEthSigner.address(tk) }.getOrNull() ?: return null // TEMP local integration (PM A3)
+        val temp = runCatching { BeamioNativeEthSigner.address(tk) }.getOrNull() ?: return null // TEMP local integration (A3)
         return Own(c, tk, temp.lowercase(), pay.toString())
     }
 
@@ -236,35 +239,6 @@ object BeamioVoiceV3 {
     /** App context from [RelayNodes.attach] (callers without a context). */
     @Volatile var appContext: Context? = null
 
-    /**
-     * First `voice_listen` of a channel, signed with T and encrypted to its relay
-     * ahead of time (callee, while it rings). Nothing is sent before Answer, so the
-     * relay learns nothing and nothing is paid until the listen opens. Memory only;
-     * used once, within 5 min (the relay accepts a listen timestamp ±10 min).
-     */
-    object PreparedListens {
-        private val lock = Any()
-        private val bySid = HashMap<String, Triple<String, String, Long>>()
-
-        fun prepare(context: Context, own: Own) {
-            val relay = own.relay ?: return
-            val command = listenCommand(context, own, relay) ?: return
-            val f = CompletableFuture<String?>()
-            BeamioNativeRoutePgp.encryptToRouteAsync(context, relay.armor, command.toString()) { f.complete(it.getOrNull()) }
-            val armor = runCatching { f.get(12, TimeUnit.SECONDS) }.getOrNull()
-            if (armor.isNullOrBlank() || !armor.contains("BEGIN PGP MESSAGE")) return
-            synchronized(lock) { bySid[own.channel.sid] = Triple(relay.domain, armor, System.currentTimeMillis()) }
-        }
-
-        fun take(sid: String, relayDomain: String): String? = synchronized(lock) {
-            val now = System.currentTimeMillis()
-            bySid.entries.removeAll { now - it.value.third > 300_000L }
-            val hit = bySid.remove(sid) ?: return null
-            if (hit.first == relayDomain) hit.second else null
-        }
-
-        fun drop(sids: List<String>) = synchronized(lock) { sids.forEach { bySid.remove(it) } }
-    }
 
     object RelayNodes {
         private val lock = Any()
@@ -367,6 +341,10 @@ object BeamioVoiceV3 {
         val app = context.applicationContext
         val host = BeamioOpenPgpHost.shared(app)
         val sig = waitResult { done -> BeamioConetChatSignBroker.requestEip191(text, 10_000L) { done(it) } } ?: return false
+        if (!BeamioNativeEthSigner.signedBy(text, sig, localEoa)) {
+            Log.w(TAG, "postChatMessage not sent: self-check signer mismatch (redacted)")
+            return false
+        }
         val envelope = JSONObject()
             .put("timestamp", System.currentTimeMillis())
             .put("text", text)

@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import network.conet.chat.BeamioConetChatModule
 import org.json.JSONObject
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
@@ -66,6 +67,8 @@ object BeamioNativeVoiceSignaling {
     fun rememberOffer(incoming: BeamioVoiceOfferIdentity.ResolvedIdentity) {
         if (incoming.callId.isBlank() || !incoming.answerable) return
         val resolved = incoming
+        // Only a shell-verified offer contributes the caller's verified from to the title source.
+        if (resolved.verified) VerifiedCallerRegistry.put(resolved.callId, resolved.sessionId, resolved.callerEoa)
         cache[resolved.callId] = resolved
         if (resolved.sessionId.isNotBlank()) {
             cache[resolved.sessionId] = resolved
@@ -80,52 +83,6 @@ object BeamioNativeVoiceSignaling {
             }
             return
         }
-        BeamioVoiceV3.appContext?.let { prepareAcceptChannels(it, resolved) }
-    }
-
-    /** Callee: the four paid channels built while the call rang (memory only, nothing sent). */
-    private val preparedChannels = java.util.concurrent.ConcurrentHashMap<String, Pair<List<BeamioVoiceV3.Own>, Long>>()
-    private val preparing = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
-
-    /**
-     * Callee, while it rings: create the four paid channels, pick our relays and sign
-     * + encrypt our first listens, all on this device. Nothing is sent before Answer
-     * (the relays learn nothing, nothing is paid); declined or timed-out calls just
-     * drop it from memory. Saves the crypto WebView work on Answer.
-     */
-    fun prepareAcceptChannels(context: Context, offer: BeamioVoiceOfferIdentity.ResolvedIdentity) {
-        val app = context.applicationContext
-        val callId = offer.callId
-        val now = System.currentTimeMillis()
-        preparedChannels.entries.removeAll { e ->
-            (now - e.value.second > 300_000L).also { old -> if (old) BeamioVoiceV3.PreparedListens.drop(e.value.first.map { it.channel.sid }) }
-        }
-        if (preparedChannels.containsKey(callId) || !preparing.add(callId)) return
-        Thread {
-            try {
-                val secrets = BeamioChatPgpStore.load(app) ?: return@Thread
-                val localEoa = secrets.eoa.trim().lowercase()
-                val payerKey = BeamioVoiceV3.payerKey(app, localEoa) ?: return@Thread
-                val started = System.currentTimeMillis()
-                val made = (0 until 4).map { BeamioVoiceV3.newPaidChannel(app, payerKey, localEoa) ?: return@Thread }.toMutableList()
-                BeamioVoiceV3.RelayNodes.attach(app)
-                val exclude = setOfNotNull(BeamioSiCipherPost.normalizeIp(secrets.mailboxIp))
-                val avoid = listOf(secrets.routePublicKeyArmor, offer.callerRouteArmored)
-                val voiceRelay = BeamioVoiceV3.RelayNodes.pick(exclude, avoid) ?: return@Thread
-                val videoRelay = BeamioVoiceV3.RelayNodes.pick(exclude, avoid) ?: return@Thread
-                made[2] = made[2].copy(relay = voiceRelay)
-                made[3] = made[3].copy(relay = videoRelay)
-                if (activeCall.get()?.offer?.callId == callId) return@Thread  // Answer came first.
-                BeamioVoiceV3.PreparedListens.prepare(app, made[2])
-                BeamioVoiceV3.PreparedListens.prepare(app, made[3])
-                preparedChannels[callId] = made to System.currentTimeMillis()
-                Log.i(TAG, "v3 accept channels prepared while ringing callId=${callId.take(8)} ms=${System.currentTimeMillis() - started}")
-            } catch (e: Exception) {
-                Log.w(TAG, "v3 prepare failed: ${e.message}")
-            } finally {
-                preparing.remove(callId)
-            }
-        }
     }
 
     fun cachedOffer(callId: String, sessionId: String): BeamioVoiceOfferIdentity.ResolvedIdentity? {
@@ -134,7 +91,16 @@ object BeamioNativeVoiceSignaling {
         return null
     }
 
+    /** Terminal unbind (SDK clears its own critical section too). Native only, never a bridge command. */
+    fun unbindIncoming(callId: String) {
+        if (callId.isBlank()) return
+        IncomingUnlockFlow.cancel(callId)
+        runCatching { BeamioConetChatModule.incomingCallUnbind(callId) }
+    }
+
     fun forgetOffer(callId: String, sessionId: String) {
+        unbindIncoming(callId)
+        VerifiedCallerRegistry.remove(callId, sessionId)
         if (callId.isNotBlank()) cache.remove(callId)
         if (sessionId.isNotBlank()) cache.remove(sessionId)
         val cur = activeCall.get()
@@ -288,6 +254,10 @@ object BeamioNativeVoiceSignaling {
                         val signature = signed.getOrNull()
                         if (signature.isNullOrBlank() || !stillRingingDialer(callId)) {
                             Log.i(TAG, "dialer $type not prepared: sign")
+                            return@requestEip191 done(null)
+                        }
+                        if (!BeamioNativeEthSigner.signedBy(text, signature, localEoa)) {
+                            Log.w(TAG, "dialer $type not sent: self-check signer mismatch (redacted)")
                             return@requestEip191 done(null)
                         }
                         val envelope = JSONObject()
@@ -704,14 +674,17 @@ object BeamioNativeVoiceSignaling {
         if (!from.matches(Regex("^0x[0-9a-f]{40}$"))) return
         // v3 dialer: the callee's device is ringing (wake receipt).
         if (line.contains("voice_call_ringing_v1")) {
-            val ringing = voiceSignal(line, setOf("voice_call_ringing_v1")) ?: return
+            val ringing = VoiceSignalTrust.verifiedInner(line, from)?.takeIf { it.optString("type") == "voice_call_ringing_v1" } ?: return
             dialerDidReceiveRinging(ringing.optString("callId"), from)
             return
         }
         if (!line.contains("voice_call_accept_v1") && !line.contains("voice_call_reject_v1") &&
             !line.contains("voice_call_timeout_v1")
         ) return
-        val signal = voiceSignal(line, setOf("voice_call_accept_v1", "voice_call_reject_v1", "voice_call_timeout_v1")) ?: return
+        // v54 §61 / v68 §75: act only on a verified envelope (signer == envelope.from == inner from).
+        val signal = VoiceSignalTrust.verifiedInner(line, from)?.takeIf {
+            it.optString("type") in setOf("voice_call_accept_v1", "voice_call_reject_v1", "voice_call_timeout_v1")
+        } ?: return
         val type = signal.optString("type")
         if (type == "voice_call_accept_v1") {
             if (signal.optInt("proto", 0) == 3) dialerDidReceiveAcceptV3(context, signal, from)
@@ -1177,41 +1150,80 @@ object BeamioNativeVoiceSignaling {
      * message (recipient PGP + mailbox route layer, random entry). On [io].
      */
     private fun sendAcceptV3(app: Context, offer: BeamioVoiceOfferIdentity.ResolvedIdentity, localEoa: String) {
+        // Fulfill-time registration (bind), then one SDK authorize (chat interface spec 22 §二; v100 §104.2; v114 §133).
+        // Bind only for a shell-verified offer addressed to the current local account (fail closed otherwise).
+        val bound = AnswerAuthorization.bindEligible(offer.verified, offer.to, localEoa) &&
+            runCatching { BeamioConetChatModule.incomingCallBind(offer.callId, offer.to.trim().lowercase()) }.getOrDefault(false)
+        if (!bound) {
+            Log.i(TAG, "v3 accept not bound; nothing signed callId=${offer.callId.take(8)}")
+            unbindIncoming(offer.callId)
+            sendDecline(app, offer.callId, offer.sessionId, reason = "cancelled")
+            return
+        }
+        when (AnswerAuthorization.authorizeAnswer(offer.callId, localEoa)) {
+            AnswerAuthorization.Verdict.ALLOW -> signAndSendAccept(app, offer, localEoa)
+            // Only the SDK's needs_unlock (the passcode is the missing part) keeps the registration and asks for unlock.
+            AnswerAuthorization.Verdict.NEEDS_UNLOCK -> startUnlockForAnswer(app, offer, localEoa)
+            AnswerAuthorization.Verdict.DENY -> {
+                Log.i(TAG, "v3 accept not authorized; nothing signed callId=${offer.callId.take(8)}")
+                unbindIncoming(offer.callId)
+                sendDecline(app, offer.callId, offer.sessionId, reason = "cancelled")
+            }
+        }
+    }
+
+    /** Locked answer: request the PWA unlock; success authorizes once (see [IncomingUnlockFlow]). */
+    private fun startUnlockForAnswer(app: Context, offer: BeamioVoiceOfferIdentity.ResolvedIdentity, localEoa: String) {
+        val endCancelled = {
+            unbindIncoming(offer.callId)
+            sendDecline(app, offer.callId, offer.sessionId, reason = "cancelled")
+        }
+        // Runs the request to a running PWA; no PWA, or a refused payload, cancels (cold start not wired: fail closed).
+        IncomingUnlockFlow.start(
+            offer.callId,
+            localEoa,
+            emit = { MainActivity.emitIncomingCallUnlockRequest(it) },
+            // The unlock success triggers exactly one more authorize (v114 §133.5): ALLOW signs, anything else cancels.
+            onAuthorize = {
+                io.execute {
+                    if (AnswerAuthorization.authorizeAnswer(offer.callId, localEoa) == AnswerAuthorization.Verdict.ALLOW) {
+                        signAndSendAccept(app, offer, localEoa)
+                    } else {
+                        endCancelled()
+                    }
+                }
+            },
+            onCancel = endCancelled,
+        )
+    }
+
+    private fun signAndSendAccept(app: Context, offer: BeamioVoiceOfferIdentity.ResolvedIdentity, localEoa: String) {
         val payerKey = BeamioVoiceV3.payerKey(app, localEoa) ?: run {
             Log.w(TAG, "v3 accept — no stored wallet key")
             return
         }
         BeamioCallTiming.mark("accept-v3-start")
-        val prepared = preparedChannels.remove(offer.callId)
-            ?.takeIf { System.currentTimeMillis() - it.second < 300_000L }?.first
-        val cv: BeamioVoiceV3.Own
-        val cV: BeamioVoiceV3.Own
-        val ev: BeamioVoiceV3.Own
-        val eV: BeamioVoiceV3.Own
-        if (prepared != null) {
-            Log.i(TAG, "v3 accept uses channels prepared while ringing callId=${offer.callId.take(8)}")
-            cv = prepared[0]; cV = prepared[1]; ev = prepared[2]; eV = prepared[3]
-        } else {
-            val made = (0 until 4).map {
-                BeamioVoiceV3.newPaidChannel(app, payerKey, localEoa) ?: run {
-                    Log.w(TAG, "v3 accept — sign failed")
-                    return
-                }
-            }
-            BeamioVoiceV3.RelayNodes.attach(app)
-            val secrets = BeamioChatPgpStore.load(app) ?: return
-            val exclude = setOfNotNull(BeamioSiCipherPost.normalizeIp(secrets.mailboxIp))
-            val avoid = listOf(secrets.routePublicKeyArmor, offer.callerRouteArmored)
-            val voiceRelay = BeamioVoiceV3.RelayNodes.pick(exclude, avoid)
-            val videoRelay = BeamioVoiceV3.RelayNodes.pick(exclude, avoid)
-            if (voiceRelay == null || videoRelay == null) {
-                Log.w(TAG, "v3 accept — no relay nodes cached")
+        // Signing happens only here: after the user's Answer and an authorize allow (spec r3x §三, chat interface spec 26 §一).
+        val made = (0 until 4).map {
+            BeamioVoiceV3.newPaidChannel(app, payerKey, localEoa) ?: run {
+                Log.w(TAG, "v3 accept — sign failed")
                 return
             }
-            cv = made[0]; cV = made[1]
-            ev = made[2].copy(relay = voiceRelay)
-            eV = made[3].copy(relay = videoRelay)
         }
+        BeamioVoiceV3.RelayNodes.attach(app)
+        val secrets = BeamioChatPgpStore.load(app) ?: return
+        val exclude = setOfNotNull(BeamioSiCipherPost.normalizeIp(secrets.mailboxIp))
+        val avoid = listOf(secrets.routePublicKeyArmor, offer.callerRouteArmored)
+        val voiceRelay = BeamioVoiceV3.RelayNodes.pick(exclude, avoid)
+        val videoRelay = BeamioVoiceV3.RelayNodes.pick(exclude, avoid)
+        if (voiceRelay == null || videoRelay == null) {
+            Log.w(TAG, "v3 accept — no relay nodes cached")
+            return
+        }
+        val cv = made[0]
+        val cV = made[1]
+        val ev = made[2].copy(relay = voiceRelay)
+        val eV = made[3].copy(relay = videoRelay)
         val ch = BeamioVoiceV3.acceptChannels(cv, cV, ev, eV) ?: return
         val nowMs = System.currentTimeMillis()
         val text = JSONObject()

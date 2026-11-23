@@ -26,7 +26,7 @@ object CashTreesWebConsoleRelay {
     private var lastBridgeLogAtMs: Long = 0L
 
     fun logNative(message: String) {
-        if (!BuildConfig.DEBUG) return // PM R675: this relay writes nothing in release and store builds
+        if (!BuildConfig.DEBUG) return // this relay writes nothing in release and store builds
         Log.i(LOG_TAG, "[native] $message")
     }
 
@@ -201,7 +201,7 @@ object CashTreesWebConsoleRelay {
     }
 
     private fun writeLog(level: String, message: String) {
-        // PM R675 (2026-11-14): page text may hold sensitive content, so release and store builds write nothing to logcat.
+        // (2026-11-14): page text may hold sensitive content, so release and store builds write nothing to logcat.
         // The bridge methods stay (old pages must not break); debug and QA builds log as before.
         if (!BuildConfig.DEBUG) return
         val text = message.ifEmpty { "(empty)" }

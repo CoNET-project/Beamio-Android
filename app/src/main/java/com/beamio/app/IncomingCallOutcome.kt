@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * queryIncomingCallOutcome (spec r3gi §25.52EF, §25.52EH.1, §25.52EE.1, §25.52DU.1–DU.2; PM R853, R857, R859, R861).
+ * queryIncomingCallOutcome (spec r3gi §25.52EF, §25.52EH.1, §25.52EE.1, §25.52DU.1–DU.2).
  *
  * args `{calls:[{callId, sessionId, createdAt}]}`: callId and sessionId are strings (an empty string is a valid value),
  * createdAt is an integer (milliseconds). Any shape error (no calls array, more than [MAX_BATCH] entries, an entry that is
@@ -33,7 +33,7 @@ object IncomingCallOutcome {
     /**
      * Keys the shell writes when a call rings (BeamioTelecomService.noteIncomingRang): the older per-id keys (trimmed, as
      * before) plus the pair key. The pair key uses callId and sessionId exactly as received, without trim, because the
-     * query compares them exactly (§25.52EF.4, audit r861 E2); it is written only when both are non-empty (§25.52EH.1).
+     * query compares them exactly (§25.52EF.4); it is written only when both are non-empty (§25.52EH.1).
      */
     fun recordKeys(ids: List<String>, callId: String, sessionId: String): List<String> {
         val pair = if (callId.isNotEmpty() && sessionId.isNotEmpty()) listOf(pairKey(callId, sessionId)) else emptyList()

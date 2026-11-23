@@ -7,7 +7,7 @@ import java.nio.charset.CodingErrorAction
 
 /**
  * Reads the old PWA wallet record (0.52.x, PouchDB idb adapter) straight from a copy of the WebView IndexedDB
- * directory, in native memory only (R349 plan N, source P per 25.52A.6). Never writes the directory.
+ * directory, in native memory only (plan N, source P per 25.52A.6). Never writes the directory.
  *
  * Path (measured on 0.52.932): database `_pouch_conet` → `document-store` row `init` (winningRev, deletedOrLocal)
  * → `by-sequence` row whose `_doc_id_rev` is `init::<winningRev>` → `title` = base64(JSON). PGP lives at

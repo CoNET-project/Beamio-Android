@@ -83,7 +83,8 @@ object BeamioNativeVoiceChannel {
      * rejects a frame whose base64 payload exceeds 12 000 chars (≈ 8.9 KB raw),
      * answering `invalid_voice_frame`.
      */
-    private const val MAX_PACKET_BYTES = 8_000
+    // v107 §117: inner CVC2 blob up to 9036 bytes (4+16+16+9000) must fit in one packet; no fragmentation.
+    private const val MAX_PACKET_BYTES = 9_036
     private val io = Executors.newCachedThreadPool()
 
     // ---- Link health (in-call reconnect / connection lost) ----
@@ -615,12 +616,8 @@ object BeamioNativeVoiceChannel {
         if (video && !reconnect && live.role == BeamioNativeVoiceSignaling.Role.DIALER) {
             runCatching { voiceFirstLatch.await(4, java.util.concurrent.TimeUnit.SECONDS) }
         }
-        // Built while the call rang (callee): no signing or encryption on the Answer path.
-        val prepared = if (!reconnect) BeamioVoiceV3.PreparedListens.take(own.channel.sid, relay.domain) else null
-        val encrypted = if (prepared != null) {
-            Log.i(TAG, "v3 listen prepared video=$video")
-            prepared
-        } else {
+        // Built only on an active call (after the Answer and authorize allow; spec r3x §三).
+        val encrypted = run {
             val command = BeamioVoiceV3.listenCommand(context, own, relay) ?: run {
                 Log.w(TAG, "v3 listen build failed video=$video")
                 if (!video) voiceFirstLatch.countDown()

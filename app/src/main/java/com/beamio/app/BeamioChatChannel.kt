@@ -1,6 +1,8 @@
 package com.beamio.app
 
 import android.net.Uri
+import android.os.SystemClock
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
@@ -11,7 +13,7 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 
 /**
- * `window.BeamioChat` (PM R756/R763 scheme 1; spec r3er §25.52AA.10): the chat-module
+ * `window.BeamioChat` (scheme 1; spec r3er §25.52AA.10): the chat-module
  * channel with origin and main-frame checks. WebViewCompat.addWebMessageListener with the only allowed origin
  * https://appassets.androidplatform.net.
  *
@@ -29,6 +31,11 @@ object BeamioChatChannel {
 
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
+    /** One thread for the SDK chat commands, in order. Never the main thread (see the ANR note in attach). */
+    private val sdkExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "beamio-chat-cmd").apply { isDaemon = true } }
+    }
+
     fun attach(webView: WebView, onCommand: (String, (JSONObject) -> Unit) -> Unit, onSignResponse: (String) -> Unit) {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
         WebViewCompat.addWebMessageListener(webView, JS_NAME, setOf(ChatOriginGate.TRUSTED)) { _: WebView, message: WebMessageCompat, sourceOrigin: Uri, isMainFrame: Boolean, reply: JavaScriptReplyProxy ->
@@ -43,7 +50,27 @@ object BeamioChatChannel {
                     // AA.10: SDK events (acks and async events) go to the most recent main-frame reply proxy; after a
                     // reload the new page's first message takes over.
                     latest = reply
-                    onCommand(d.json) { payload -> toLatest(payload.toString()) }
+                    // 182 follow-up (2026-11-20): same-launch correlation logs. Names, reqId, times and error codes only.
+                    val head = ReqCorrelation.head(d.json)
+                    val t0 = SystemClock.elapsedRealtime()
+                    head?.let { (t, r) -> Log.i(ReqCorrelation.TAG, ReqCorrelation.enqueued("chat", t, r)) }
+                    // ANR fix (S25 176, 2026-11-17): the SDK call runs on one background thread, in arrival order. The SDK's first
+                    // command can read the keystore (migrateLegacy, state()); on the main thread that froze input for 10 s.
+                    sdkExecutor.execute {
+                        val t1 = SystemClock.elapsedRealtime()
+                        head?.let { (t, r) -> Log.i(ReqCorrelation.TAG, ReqCorrelation.started("chat", t, r, t1 - t0)) }
+                        val answered = java.util.concurrent.atomic.AtomicBoolean(false)
+                        onCommand(d.json) { payload ->
+                            head?.let { (t, r) ->
+                                // The first ack only (one reply line per command); acks and events after it are not logged.
+                                if (ReqCorrelation.isAck(payload) && answered.compareAndSet(false, true)) {
+                                    ReqCorrelation.reply("chat", t, r, SystemClock.elapsedRealtime() - t0, payload)
+                                        ?.let { Log.i(ReqCorrelation.TAG, it) }
+                                }
+                            }
+                            toLatest(payload.toString())
+                        }
+                    }
                 }
             }
         }

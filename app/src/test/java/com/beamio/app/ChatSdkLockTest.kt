@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** PM R2079: the chat SDK is pinned in app/chat-sdk.lock and the build checks the resolved AAR against it. */
+/**: the chat SDK is pinned in app/chat-sdk.lock and the build checks the resolved AAR against it. */
 class ChatSdkLockTest {
     private val lock = File("chat-sdk.lock").readLines()
         .filter { it.isNotBlank() && !it.startsWith("#") && it.contains("=") }

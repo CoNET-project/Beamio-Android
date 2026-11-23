@@ -38,10 +38,11 @@ object ShellCredentialTrust {
         isMainFrame: Boolean,
         sourceOrigin: String?,
         requireCapability: Boolean = true,
+        passcode: Boolean = false,
     ): WalletCredentialGate.Verdict {
         val base = inputs(channel, isMainFrame, sourceOrigin)
-        val early = WalletCredentialGate.evaluate(base, requireCapability)
+        val early = WalletCredentialGate.evaluate(base, requireCapability, passcode)
         if (early != WalletCredentialGate.Verdict.BUNDLE_NOT_VERIFIED) return early
-        return WalletCredentialGate.evaluate(base.copy(verifiedActiveZipSha256 = EmbeddedPwaBundleStore.currentVerifiedActiveZipSha256()), requireCapability)
+        return WalletCredentialGate.evaluate(base.copy(verifiedActiveZipSha256 = EmbeddedPwaBundleStore.currentVerifiedActiveZipSha256()), requireCapability, passcode)
     }
 }

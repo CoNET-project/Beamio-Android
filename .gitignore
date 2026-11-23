@@ -18,9 +18,9 @@ keystore.properties
 .jdk-17/
 .android-sdk/
 
-# Firebase client config: kept out of git (PM R1693/R1717); builds use an untracked local copy.
+# Firebase client config: kept out of git; builds use an untracked local copy.
 app/google-services.json
-# Signing material never goes into git (PM R1726 review): upload keys and certificates stay local.
+# Signing material never goes into git (review): upload keys and certificates stay local.
 *.p12
 *.pfx
 *.keystore

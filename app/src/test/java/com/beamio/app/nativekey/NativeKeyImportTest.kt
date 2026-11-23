@@ -28,13 +28,13 @@ class NativeKeyImportTest {
 
     private val pmList = listOf(
         "prepareSystemCall", "cancelPreparedSystemCall", "startSystemCall", "reportIncomingSystemCall", "endSystemCall",
-        "clearOfflineChatAlerts", "notifyBackgroundChat", "postPgpCiphertext", // setNativeChatPgpSecrets removed (PM R679)
+        "clearOfflineChatAlerts", "notifyBackgroundChat", "postPgpCiphertext", // setNativeChatPgpSecrets removed
         "setNativeVoiceRelayNodes", "setNativeSiNodeRoster", "chatModuleSignResponse", "bindPushIdentity",
         "registerPushDeviceHttp", "saveRecoveryQrToPhotos", "scanRecoveryQr",
-        // PM R675 (2026-11-14): call-related entries added to the gate
+        // (2026-11-14): call-related entries added to the gate
         "notifyVoiceMicReady", "queryIncomingCallOutcome", "startNativeVoiceMic", "cacheCallerAvatars",
     )
-    // scanRecoveryQr: removed from the Android shell (PM R820, spec r3fr §25.52DR.4)
+    // scanRecoveryQr: removed from the Android shell (spec r3fr §25.52DR.4)
     private val absentOnAndroid = setOf("registerPushDeviceHttp", "saveRecoveryQrToPhotos", "scanRecoveryQr")
 
     @Test
@@ -69,7 +69,7 @@ class NativeKeyImportTest {
     fun everyGatedEntryChecksTheGateFirst() {
         val src = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         for (e in ShellNoKeyGate.GATED) {
-            // R789: the sensitive entries are plain `open fun` on the base bridge (reached via window.BeamioShell / the legacy subclass).
+            // the sensitive entries are plain `open fun` on the base bridge (reached via window.BeamioShell / the legacy subclass).
             val m = Regex("(?:@JavascriptInterface\\s+fun|open fun) $e\\([^)]*\\)[^{\\n]*\\{\\n([^\\n]*)\\n").find(src)
             checkNotNull(m) { "no bridge entry $e" }
             // Boolean entries (startNativeVoiceMic) return false; the others return Unit.

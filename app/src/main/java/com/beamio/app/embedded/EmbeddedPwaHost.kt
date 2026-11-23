@@ -19,7 +19,7 @@ class EmbeddedPwaHost(context: Context) {
     val bundleStore = EmbeddedPwaBundleStore(appContext, remotePwaUpdate, BuildConfig.PWA_ZIP_SHA256)
 
     /**
-     * Capability bit for the page (store-build OTA shell/PWA protocol, PM decision 2026-11-12):
+ * Capability bit for the page (store-build OTA shell/PWA protocol, since 2026-11-12):
      * only builds with remote PWA update declare it, at document start. The script text comes from
      * the `ota` source set; the store build type has none (and does not inject `applyEmbeddedPwaUpdate`).
      */

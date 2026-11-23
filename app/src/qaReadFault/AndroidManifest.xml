@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Manifest used instead of src/debug/AndroidManifest.xml only for the t168 read-fault debugqa package
+     (-PchatQaHooks with -PallowQaHooksOnDebugqa=t168-read-fault, QA exception). Same content as src/debug/AndroidManifest.xml
+     (keep in sync) plus the QA switch receiver, which needs android.permission.DUMP (held by shell/adb and system only).
+     Release and store never use it. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <receiver
+            android:name="com.beamio.app.BeamioIncomingCallSmokeReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="com.beamio.app.SMOKE_INCOMING_CALL" />
+                <action android:name="com.beamio.app.SMOKE_ANSWER" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name="com.beamio.app.qa.readfault.QaReadFaultReceiver"
+            android:exported="true"
+            android:enabled="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.beamio.app.qa.READ_FAULT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

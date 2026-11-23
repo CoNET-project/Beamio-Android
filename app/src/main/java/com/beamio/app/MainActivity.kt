@@ -58,6 +58,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import com.beamio.app.credential.SdkPayloadFilter
+import com.beamio.app.credential.PageSyncRoute
+import com.beamio.app.credential.PasscodeStateInbound
 import com.beamio.app.credential.ShellCredentialTrust
 import com.beamio.app.credential.WalletCredentialGate
 import com.beamio.app.embedded.EmbeddedPwaConstants
@@ -101,7 +103,7 @@ private object NfcStatusStrings {
 class MainActivity : ComponentActivity() {
 
     companion object {
-        /** PM R1574: Retry on the unavailable page (handled in shouldOverrideUrlLoading, never fetched). */
+        /**: Retry on the unavailable page (handled in shouldOverrideUrlLoading, never fetched). */
         private const val EMBEDDED_RETRY_URL = "https://appassets.androidplatform.net/__beamio/retry-bootstrap"
 
         private val EMBEDDED_UNAVAILABLE_HTML = """
@@ -122,6 +124,25 @@ class MainActivity : ComponentActivity() {
 
         @Volatile
         private var activeInstance: MainActivity? = null
+
+        /** v66 §73: nativeCallHangup event to the page (chat-module event channel). No-op when no page is running. */
+        /** Running PWA: deliver the unlock request (same field set as the cold-start parameter). False when no page runs. */
+        fun emitIncomingCallUnlockRequest(payload: JSONObject): Boolean {
+            val activity = activeInstance ?: return false
+            val event = JSONObject(payload.toString()).put("type", "incomingCallUnlockRequest")
+            activity.runOnUiThread {
+                activity.dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "chatModuleEvent").put("event", event))
+            }
+            return true
+        }
+
+        fun emitNativeCallHangup(callId: String, sessionId: String) {
+            val activity = activeInstance ?: return
+            val event = NativeCallHangupEvent.build(callId, sessionId, System.currentTimeMillis())
+            activity.runOnUiThread {
+                activity.dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "chatModuleEvent").put("event", event))
+            }
+        }
 
         @Volatile
         private var uiResumed: Boolean = false
@@ -702,8 +723,8 @@ class MainActivity : ComponentActivity() {
                             .put("action", bridgeAction)
                             .put("ok", true)
                             .put("requestId", requestId)
-                            // Spec r3dk §25.52BM.1 and CRED (PM R697/R709): a recovery code is never returned over the bridge.
-                            // scanRecoveryQr is gone (PM R820), so only general scans reach here.
+                            // Spec r3dk §25.52BM.1 and CRED: a recovery code is never returned over the bridge.
+                            // scanRecoveryQr is gone, so only general scans reach here.
                             .put("text", text),
                     )
                 } else {
@@ -756,11 +777,11 @@ class MainActivity : ComponentActivity() {
      * return before reading their argument. Returns true when the entry must stop.
      */
     /**
-     * Spec §25.52BU.2 / §25.52BX.1 (PM R716): a page URL with a key-shaped part is not opened and produces no event; the
+ * Spec §25.52BU.2 / §25.52BX.1: a page URL with a key-shaped part is not opened and produces no event; the
      * page gets one `{type:"ack", reqId, ok:false, error:"key_shaped_content"}`. The URL is never echoed or logged.
      */
     /**
-     * PM R756/R758: the embedded WebView carries CashTreesAndroid and the BeamioChat/BeamioShellRecord channels, so a
+ *the embedded WebView carries CashTreesAndroid and the BeamioChat/BeamioShellRecord channels, so a
      * top-level navigation (including window.open, which loads in place because multiple windows are off) to any origin
      * other than the embedded page never loads here. http(s) goes to the external browser after the URL key-shape check;
      * other schemes are left to the existing handling. Returns true when the navigation was taken over.
@@ -788,7 +809,7 @@ class MainActivity : ComponentActivity() {
 
     private fun shellNoKey(entry: String): Boolean {
         val code = ShellNoKeyGate.answer(entry) ?: return false
-        // Debug and QA builds only (audit, R675 review): names and codes, never payloads.
+        // Debug and QA builds only (audit, review): names and codes, never payloads.
         if (BuildConfig.DEBUG) android.util.Log.i("BeamioShellGate", "entry=$entry code=$code")
         runOnUiThread {
             dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", entry).put("ok", false).put("error", code))
@@ -940,7 +961,9 @@ class MainActivity : ComponentActivity() {
                 source = consoleMessage.sourceId(),
                 lineNumber = consoleMessage.lineNumber(),
             )
-            return false
+            // Defence in depth (log hygiene): release and store consume the message, so the WebView's default
+            // handler never writes page console text to logcat (chromium tag). DEBUG builds (debug, debugqa) keep the default.
+            return ReleaseLogPolicy.consumeConsoleMessage(BuildConfig.DEBUG)
         }
     }
 
@@ -1208,7 +1231,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // scanRecoveryQr removed (PM R820, spec r3fr §25.52DR.4): no entry on either bridge; BeamioShell answers unknown_command.
+        // scanRecoveryQr removed (spec r3fr §25.52DR.4): no entry on either bridge; BeamioShell answers unknown_command.
 
         /** Open http(s)/mailto/tel or catalog wallet schemes — mirrors iOS `CashTreesIOS.openURL`. */
         open fun openURL(url: String) {
@@ -1388,7 +1411,9 @@ class MainActivity : ComponentActivity() {
             Log.i("BeamioVoiceCall", "WebView reportIncomingSystemCall received")
             runOnUiThread {
                 val body = runCatching { JSONObject(json) }.getOrElse {
-                    Log.e("BeamioVoiceCall", "Invalid reportIncomingSystemCall JSON", it)
+                    // An org.json error message echoes the input; release logs the exception class only.
+                    if (BuildConfig.DEBUG) Log.e("BeamioVoiceCall", "Invalid reportIncomingSystemCall JSON", it)
+                    else Log.e("BeamioVoiceCall", "Invalid reportIncomingSystemCall JSON: ${it.javaClass.simpleName}")
                     return@runOnUiThread
                 }
                 val callId = body.optString("callId").trim()
@@ -1472,7 +1497,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread { publishDeliveryHealth() }
         }
 
-        // requestPendingSystemCallAction removed (PM R680, spec r3dg §25.52BI.1): no page version calls it.
+        // requestPendingSystemCallAction removed (spec r3dg §25.52BI.1): no page version calls it.
 
         open fun endSystemCall(json: String) {
             if (shellNoKey("endSystemCall")) return
@@ -1485,12 +1510,32 @@ class MainActivity : ComponentActivity() {
                     "endSystemCall bridge callIdPresent=${callId.isNotBlank()} " +
                         "sessionIdPresent=${sessionId.isNotBlank()}",
                 )
-                BeamioTelecomService.end(
+                BeamioTelecomService.endLocalSystemCall(
                     this@MainActivity,
                     callId.ifBlank { sessionId },
                     sessionId,
                 )
             }
+        }
+
+        /**
+         * PWA dismiss of an incoming call that was not answered (v46 §52): silence and hide
+         * the incoming UI, stop the ring, drop the registration. Local only: no voice_end_v1,
+         * no reject, no ack, no sign, no answer. The native session, uiUnlocked, gen and the
+         * dedupe records are not touched. endSystemCall stays for in-call hang-up (uplink).
+         */
+        open fun dismissIncomingSystemCall(json: String): String {
+            // Not gated by shellNoKey on purpose: the local dismiss only silences the ring and hides the
+            // incoming UI. It never signs, answers or uplinks, and changes no session or dedupe state, so
+            // a locked or not-ready gate must not stop the call screen from closing (v48 §54.4).
+            val body = runCatching { JSONObject(json) }.getOrNull() ?: return "bad_request"
+            val callId = body.optString("callId").trim()
+            val sessionId = body.optString("sessionId").trim()
+            if (!VoiceDismissInput.valid(callId, sessionId)) return "bad_request"
+            runOnUiThread {
+                BeamioTelecomService.dismissIncomingLocal(this@MainActivity, callId, sessionId)
+            }
+            return "ok"
         }
 
         /** Native video capture for the Chat Camera action. Android JS interfaces receive strings only. */
@@ -1545,7 +1590,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        /** Alias of [queryInstalledApps] (PM R709, spec §25.52BD.1): same work, same (ungated) no_key state as iOS. */
+        /** Alias of [queryInstalledApps] (spec §25.52BD.1): same work, same (ungated) no_key state as iOS. */
         open fun listInstalledWalletApps(): String = queryInstalledApps("{}")
 
         /** Alias of [queryInstalledApps] with the same `{ requestId?, queries? }` payload. */
@@ -1614,7 +1659,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // setNativeChatPgpSecrets removed (PM R679, 2026-11-14): PGP secrets never cross the bridge (iOS removed the same entry).
+        // setNativeChatPgpSecrets removed (2026-11-14): PGP secrets never cross the bridge (iOS removed the same entry).
 
         /** Voice v3: route keys of all nodes (public), cached for picking relays. */
         open fun setNativeVoiceRelayNodes(json: String) {
@@ -1676,7 +1721,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 } catch (error: Exception) {
-                    Log.w(TAG, "postPgpCiphertext failed: ${error.message}")
+                    Log.w(TAG, "postPgpCiphertext failed: ${ReleaseLogPolicy.exceptionDetail(error, BuildConfig.DEBUG)}")
                 }
             }.start()
         }
@@ -1699,7 +1744,7 @@ class MainActivity : ComponentActivity() {
                 val sessionId = obj.optString("sessionId", "").trim()
                 BeamioTelecomService.notifyVoiceMicReady(callId, sessionId)
             } catch (error: Exception) {
-                Log.w(TAG, "notifyVoiceMicReady parse failed: ${error.message}")
+                Log.w(TAG, "notifyVoiceMicReady parse failed: ${ReleaseLogPolicy.exceptionDetail(error, BuildConfig.DEBUG)}")
             }
         }
 
@@ -1743,7 +1788,15 @@ class MainActivity : ComponentActivity() {
          * `{ action: "chatModuleEvent", event }` and `{ action: "chatModuleSignRequest", … }`.
          */
         open fun chatModuleCommand(json: String) {
-            // Origin first, then reqId (r3ej §25.52CJ.3, r3em CM.3, PM R756): an untrusted top-level page never reaches the SDK.
+            // Gate order (2026-11-17): pwaWalletSync and nativeMnemonicPreread enter the trust gate before the top-level origin check,
+            // so an untrusted page gets untrusted_source (contract §十一), never origin_refused. Other commands keep the check below.
+            PageSyncRoute.normalize(json)?.let { pageSync ->
+                handlePageSyncCommand(pageSync, WalletCredentialGate.Channel.JS_INTERFACE) { payload ->
+                    runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) }
+                }
+                return
+            }
+            // Origin first, then reqId (r3ej §25.52CJ.3, r3em CM.3): an untrusted top-level page never reaches the SDK.
             if (!ChatOriginGate.allowed(embeddedTopOrigin)) {
                 val refused = JSONObject().put("type", "ack").put("reqId", BridgeReqId.fromJsonText(json) ?: JSONObject.NULL)
                     .put("ok", false).put("error", ChatOriginGate.ERROR)
@@ -1771,13 +1824,13 @@ class MainActivity : ComponentActivity() {
      * keeps the latest command's deliver for its later events.
      */
     /**
-     * window.BeamioShell (PM R789): one accepted call, already checked for origin, main frame, JSON, reqId and action.
+ * window.BeamioShell: one accepted call, already checked for origin, main frame, JSON, reqId and action.
      * Refusals the old methods sent as `cashtreesandroid` events are answered on the channel instead, exactly once:
      * the no-key gate (no_key / not_ready) and the URL check (key_shaped_content) run here before the method.
      */
-    private fun handleShellCall(bridge: CashTreesJsBridge, c: BeamioShellChannel.Decision.Call): JSONObject {
+    private fun handleShellCall(bridge: CashTreesJsBridge, c: BeamioShellChannel.Decision.Call, gate: String?): JSONObject {
         val ack = BeamioShellChannel.ack(c.action, c.reqId)
-        ShellNoKeyGate.answer(c.action)?.let { code ->
+        gate?.let { code ->
             if (BuildConfig.DEBUG) android.util.Log.i("BeamioShellGate", "entry=${c.action} code=$code channel=BeamioShell")
             return ack.put("ok", false).put("error", code)
         }
@@ -1820,6 +1873,32 @@ class MainActivity : ComponentActivity() {
             "startSystemCall" -> bridge.startSystemCall(c.arg)
             "reportIncomingSystemCall" -> bridge.reportIncomingSystemCall(c.arg)
             "endSystemCall" -> bridge.endSystemCall(c.arg)
+            "nativeIdentityCheck" -> {
+                // qa.8 public entry (in-process). Only type, reqId and eoa are allowed (SDK NativeIdentityCheck).
+                val body = runCatching { JSONObject(c.arg) }.getOrNull()
+                    ?: return ack.put("ok", false).put("error", "bad_request")
+                if (body.keys().asSequence().any { it !in setOf("type", "reqId", "eoa") }) {
+                    return ack.put("ok", false).put("error", "bad_request")
+                }
+                return BeamioConetChatModule.nativeIdentityCheck(body.optString("eoa"))
+            }
+            "incomingCallUnlockShown" -> {
+                // PWA: the unlock entry is interactive (v114 §133.4). Only a matching, still-loading call changes phase.
+                val shownCallId = runCatching { JSONObject(c.arg).optString("callId") }.getOrDefault("")
+                if (shownCallId.isNotBlank()) IncomingUnlockFlow.shown(shownCallId)
+                return ack.put("ok", true)
+            }
+            "uiLockState" -> {
+                // Only locked:true has an effect (SDK): it clears the UI-unlock reading, never the native session.
+                val locked = runCatching { JSONObject(c.arg).opt("locked") as? Boolean }.getOrNull()
+                    ?: return ack.put("ok", false).put("error", "bad_request")
+                if (locked) BeamioConetChatModule.uiLockState(true)
+                return ack.put("ok", true)
+            }
+            "dismissIncomingSystemCall" -> {
+                val r = bridge.dismissIncomingSystemCall(c.arg)
+                return if (r == "ok") ack.put("ok", true) else ack.put("ok", false).put("error", r)
+            }
             "startNativeVoiceMic" -> return ack.put("ok", true).put("result", bridge.startNativeVoiceMic())
             "stopNativeVoiceMic" -> bridge.stopNativeVoiceMic()
             else -> return ack.put("ok", false).put("error", "unknown_command")
@@ -1841,6 +1920,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
+        // E1/E3 (v3.3.1) and the iOS review: a page-sync request, flat or nested, passes the trust gate before anything else.
+        PageSyncRoute.normalize(json)?.let { pageSync ->
+            handlePageSyncCommand(pageSync, channel, deliver)
+            return
+        }
         val body = try {
             JSONObject(json)
         } catch (_: Exception) {
@@ -1874,7 +1958,7 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        // PM R2040: an init without apiBaseUrl (or with one on beamio.app) would leave the SDK on its old-domain default;
+        // an init without apiBaseUrl (or with one on beamio.app) would leave the SDK on its old-domain default;
         // the shell fills in the live base. Logged without the value.
         if (body.optString("type") == "init") {
             BeamioWebHosts.chatApiBaseFor(if (body.has("apiBaseUrl")) body.optString("apiBaseUrl") else null)?.let {
@@ -1882,7 +1966,9 @@ class MainActivity : ComponentActivity() {
                 Log.i(TAG, "init apiBaseUrl set to the live domain")
             }
         }
-        // The API base is pinned to beamio.ca before the SDK sees an init (PM 2026-11-17; see ChatApiBase).
+        // The API base is pinned to beamio.ca before the SDK sees an init (2026-11-17; see ChatApiBase).
+        // Defence in depth: a page never supplies trustedOrigin on an ordinary command (only the shell sets it, for page-sync).
+        PageSyncRoute.stripPageTrustedOrigin(body)
         com.beamio.app.chatapi.ChatApiBase.pin(body)
         BeamioChatSendHold.onCommand(applicationContext, body)
         BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
@@ -1895,6 +1981,12 @@ class MainActivity : ComponentActivity() {
      * (never for walletCredential), the send hold and the caller's channel.
      */
     private fun sdkDeliver(deliver: (JSONObject) -> Unit): (JSONObject) -> Unit = { raw ->
+        // Index x §25.2: the shell's own copy of passcodeState (SDK native path only). Observed only; no stop action in this step.
+        PasscodeStateInbound.observe(raw, PasscodeStateInbound.Source.SDK_NATIVE).let { (outcome, state) ->
+            if (outcome == PasscodeStateInbound.Outcome.ACCEPTED && state != null) {
+                Log.i(CREDENTIAL_TAG, "passcodeState set=${state.set} locked=${state.locked} stopOnLock=${PasscodeStateInbound.STOP_ON_PASSCODE_LOCKED}")
+            }
+        }
         val r = sdkPayloadFilter.filter(raw)
         r.logLine?.let { Log.i(CREDENTIAL_TAG, it) } // log point 2 for walletCredential replies
         r.payload?.let { payload ->
@@ -1905,6 +1997,58 @@ class MainActivity : ComponentActivity() {
     }
 
     private val sdkPayloadFilter = SdkPayloadFilter { SystemClock.elapsedRealtime() }
+
+    /**
+     * pwaWalletSync / nativeMnemonicPreread (contract v3.3.1, errata E1): the page's own `trustedOrigin` is removed first and set
+     * again only from the shell's verdict. Order: untrusted_source (nothing read, nothing forwarded), then key_over_bridge_refused
+     * for any credential field (pwaWalletSync allows `phrase` only; nativeMnemonicPreread allows none). Everything else goes to the SDK,
+     * which owns the format, stale_seq and overwrite rules; the SDK's answer passes through unchanged.
+     */
+    private fun handlePageSyncCommand(body: JSONObject, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
+        val command = body.optString("type")
+        val rid = BridgeReqId.valid(body.opt("reqId"))
+        body.remove("trustedOrigin")
+        credentialWorker.execute {
+            try {
+                val web = channel == WalletCredentialGate.Channel.WEB_MESSAGE
+                // Passcode commands need the SDK's wallet.passcode.v1 (protocol v1 §一第 5 条); the other page-sync commands are unchanged.
+                val verdict = ShellCredentialTrust.verdict(
+                    channel, isMainFrame = web, sourceOrigin = if (web) ChatOriginGate.TRUSTED else embeddedTopOrigin,
+                    requireCapability = false, passcode = command in PageSyncRoute.PASSCODE_ALLOWED,
+                )
+                Log.i(CREDENTIAL_TAG, "$command gate verdict=${verdict.name} reqId=${rid ?: "null"}")
+                // untrusted_source, then key_over_bridge_refused (E1). A non-null refusal never reaches the SDK.
+                PageSyncRoute.refusalBeforeSdk(body, trusted = verdict == WalletCredentialGate.Verdict.TRUSTED)?.let { refusal ->
+                    Log.i(CREDENTIAL_TAG, "$command refused reqId=${rid ?: "null"} error=${refusal.optString("error")}")
+                    deliver(chatEvent(refusal))
+                    return@execute
+                }
+                body.put("trustedOrigin", true)
+                val sdkOut = sdkDeliver(deliver)
+                val unlockCallId = if (command == PageSyncRoute.PASSCODE_UNLOCK) body.optString("callId").trim() else ""
+                val unlockEoa = body.optString("eoa").trim().lowercase()
+                val watched: (JSONObject) -> Unit = { payload ->
+                    // v114 §133.5 / v100 §104.2(b): passcodeUnlock ok with the same callId triggers the single authorize.
+                    // Success reply (SDK): {type:"ack", reqId, ok:true, result:{unlocked:true, eoa}}.
+                    if (unlockCallId.isNotBlank() && payload.optString("type") == "ack" &&
+                        payload.optString("reqId") == rid?.toString() && payload.optBoolean("ok", false)
+                    ) {
+                        val result = payload.optJSONObject("result")
+                        if (result?.optBoolean("unlocked", false) == true &&
+                            result.optString("eoa").trim().lowercase() == unlockEoa
+                        ) {
+                            IncomingUnlockFlow.unlockOk(unlockCallId, unlockEoa)
+                        }
+                    }
+                    sdkOut(payload)
+                }
+                BeamioConetChatModule.handleCommand(applicationContext, body, watched)
+            } catch (e: Exception) {
+                // No shell-side answer code is invented here: the failure is logged by type only, and nothing is forwarded.
+                Log.w(CREDENTIAL_TAG, "$command shell error ${e.javaClass.simpleName} reqId=${rid ?: "null"}")
+            }
+        }
+    }
 
     /**
      * Spec r3np §25.52Y.38 items 2, 3, 11, 13 (a): the shell's part of walletCredential. Off the main thread (hashing active/
@@ -1936,6 +2080,7 @@ class MainActivity : ComponentActivity() {
                             return@execute
                         }
                         sdkPayloadFilter.expectCredentialReply(rid!!, command)
+                        PageSyncRoute.stripPageTrustedOrigin(body) // defence in depth: never the page's own trustedOrigin
                         BeamioConetChatModule.handleCommand(applicationContext, body, sdkDeliver(deliver))
                     }
                 }
@@ -1982,7 +2127,7 @@ class MainActivity : ComponentActivity() {
      * without any real outside write. The probe result is logged redacted under the guard tag.
      */
     private fun installQaWriteGuardNativeHooks() {
-        // Debug QA builds only (src/debug QaWriteGuard); release and store compile a no-op stub (PM R675).
+        // Debug QA builds only (src/debug QaWriteGuard); release and store compile a no-op stub .
         qaEvalReceiver = QaWriteGuard.installNativeHooks(this) { if (::webView.isInitialized) webView else null }
     }
 
@@ -2058,9 +2203,9 @@ class MainActivity : ComponentActivity() {
             val uri = Uri.parse(trimmed)
             val scheme = uri.scheme?.lowercase() ?: return
             if (scheme !in ALLOWED_EXTERNAL_URL_SCHEMES) return
-            // PM 2026-11-17 (r8): the openURL bridge never hands a legacy-host link to an external app (refused, logged).
+            // 2026-11-17 (r8): the openURL bridge never hands a legacy-host link to an external app (refused, logged).
             if (com.beamio.app.net.LegacyBeamioHostGuard.refuseExternal(scheme, uri.host, uri.path)) return
-            // NFC card links are deprecated (PM R1664/R1703): a SUN URL from the bridge never opens externally.
+            // NFC card links are deprecated: a SUN URL from the bridge never opens externally.
             if ((scheme == "http" || scheme == "https") && isBlockedSunUri(uri)) return
             // go.cb-w.com: open Coinbase Wallet APP with the full URI when possible
             // (Receive-from-wallet dapp?cb_url=…). Bare trampoline → launch app / Play Store.
@@ -2281,7 +2426,7 @@ class MainActivity : ComponentActivity() {
         return false
     }
 
-    /** PM 2026-11-17 (r9): every external launch from this Activity passes here; a legacy-host intent (data or browser fallback) is refused. */
+    /** 2026-11-17 (r9): every external launch from this Activity passes here; a legacy-host intent (data or browser fallback) is refused. */
     private fun refuseLegacyIntent(intent: Intent): Boolean =
         com.beamio.app.net.LegacyBeamioHostGuard.refuseIntent(
             intent.data?.scheme,
@@ -2306,7 +2451,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Last gate for every activity launch from this activity (bridge openURL, external top-level links, wallet and
-     * intent: URIs): an NFC SUN URL (PM R1664/R1703) in the intent data, its selector, or a browser_fallback_url is
+ * intent: URIs): an NFC SUN URL in the intent data, its selector, or a browser_fallback_url is
      * never handed to another app or the system browser.
      */
     private fun isSunExternalIntent(intent: Intent?): Boolean {
@@ -2407,7 +2552,7 @@ class MainActivity : ComponentActivity() {
                         "inAppBrowser: intent pkg=$pkg dataHost=${dataUri?.host} " +
                             "fallbackHost=${runCatching { Uri.parse(fallback).host }.getOrNull()}",
                     )
-                    // PM 2026-11-17 (r8, N8): an intent whose data or browser fallback is a legacy host is refused, not launched.
+                    // 2026-11-17 (r8, N8): an intent whose data or browser fallback is a legacy host is refused, not launched.
                     val fbHost = runCatching { Uri.parse(fallback).host }.getOrNull()
                     if (
                         com.beamio.app.net.LegacyBeamioHostGuard.refuseExternal("https", dataUri?.host, dataUri?.path) ||
@@ -2657,7 +2802,7 @@ class MainActivity : ComponentActivity() {
                         "inAppBrowser: override scheme=${next.scheme} host=${next.host} " +
                             "main=${request.isForMainFrame}",
                     )
-                    if (request.isForMainFrame && isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
+                    if (request.isForMainFrame && isBlockedSunUri(next)) return true // NFC SUN link
                     if (isCoinbaseWalletTrampolineHost(next.host)) {
                         try {
                             view?.stopLoading()
@@ -2692,7 +2837,7 @@ class MainActivity : ComponentActivity() {
                         return false
                     }
                     Log.i(TAG, "inAppBrowser: override(legacy) scheme=${next.scheme} host=${next.host}")
-                    if (isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
+                    if (isBlockedSunUri(next)) return true // NFC SUN link
                     if (isCoinbaseWalletTrampolineHost(next.host)) {
                         launchCoinbaseWalletAppOrStore()
                         return true
@@ -2705,6 +2850,8 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    // Protocol v1 §一第 4 条: a top-level navigation to a non-trusted page drops the passcode event proxy.
+                    ShellRecordChannel.onTopLevelPageStarted(url)
                     injectInAppBrowserSameWindowNavigation(view)
                 }
 
@@ -2769,7 +2916,7 @@ class MainActivity : ComponentActivity() {
                         webViewClient = object : WebViewClient() {
                             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
                                 val u = request?.url ?: return null
-                                // PM 2026-11-17: WebView network ignores the Java ProxySelector, so the legacy host is refused here.
+                                // 2026-11-17: WebView network ignores the Java ProxySelector, so the legacy host is refused here.
                                 if (com.beamio.app.net.LegacyBeamioHostGuard.isLegacyHost(u.host)) {
                                     com.beamio.app.net.LegacyBeamioHostGuard.logSink(com.beamio.app.net.LegacyBeamioHostGuard.logLine(u.host, u.path))
                                     return com.beamio.app.net.LegacyBeamioHostGuard.blockedResponse()
@@ -2781,7 +2928,7 @@ class MainActivity : ComponentActivity() {
                                 if (next == null) return true
                                 Log.i(TAG, "inAppBrowser: popup→host scheme=${next.scheme} host=${next.host}")
                                 if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(next.host, next.path, false)) return true
-                                if (isBlockedSunUri(next)) return true // NFC SUN link (PM R1664)
+                                if (isBlockedSunUri(next)) return true // NFC SUN link
                                 if (isCoinbaseWalletTrampolineHost(next.host)) {
                                     launchCoinbaseWalletAppOrStore()
                                     return true
@@ -3207,11 +3354,11 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * PM R766/R771/R789 (spec §25.22.1, §25.52CT.4, §25.52CV.2): the sensitive methods are not @JavascriptInterface on
+ * (spec §25.22.1, §25.52CT.4, §25.52CV.2): the sensitive methods are not @JavascriptInterface on
      * [CashTreesJsBridge]; the page reaches them through window.BeamioShell ([BeamioShellChannel], appassets main frame
      * only) and window.BeamioChat. This subclass re-exposes them on CashTreesAndroid for pages that have not switched yet
      * (QA transition only). It is injected only when BuildConfig.LEGACY_SENSITIVE_BRIDGE is true; a build with it is not
-     * a release package (PM R788). chatModuleCommand keeps the scheme 2 top-level origin gate.
+ * a release package . chatModuleCommand keeps the scheme 2 top-level origin gate.
      */
     private inner class CashTreesJsBridgeLegacy : CashTreesJsBridge() {
         @JavascriptInterface override fun openURL(url: String) = super.openURL(url)
@@ -3234,10 +3381,18 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface override fun startSystemCall(json: String) = super.startSystemCall(json)
         @JavascriptInterface override fun reportIncomingSystemCall(json: String) = super.reportIncomingSystemCall(json)
         @JavascriptInterface override fun endSystemCall(json: String) = super.endSystemCall(json)
+        @JavascriptInterface override fun dismissIncomingSystemCall(json: String): String = super.dismissIncomingSystemCall(json)
         @JavascriptInterface override fun startNativeVoiceMic(): Boolean = super.startNativeVoiceMic()
         @JavascriptInterface override fun stopNativeVoiceMic() = super.stopNativeVoiceMic()
-        @JavascriptInterface override fun chatModuleCommand(json: String) = super.chatModuleCommand(json)
-        // PM R2120: a JavascriptInterface call carries no frame, so the main-frame + appassets rule of window.BeamioChat
+        @JavascriptInterface override fun chatModuleCommand(json: String) {
+            // Page-sync and passcode commands never take this channel (no frame/origin check here): refused before the SDK.
+            PageSyncRoute.refusalOnJsInterface(json)?.let { refusal ->
+                runOnUiThread { dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "chatModuleEvent").put("event", refusal)) }
+                return
+            }
+            super.chatModuleCommand(json)
+        }
+        // a JavascriptInterface call carries no frame, so the main-frame + appassets rule of window.BeamioChat
         // cannot be checked here. Even in an explicit -PlegacySensitiveBridge=true QA probe, a signing reply on this
         // interface is therefore always refused; signing replies go only through window.BeamioChat (BeamioChatChannel).
         @JavascriptInterface override fun chatModuleSignResponse(json: String) {
@@ -3309,6 +3464,8 @@ class MainActivity : ComponentActivity() {
         }
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // The shell-record page bridge was never assigned; install the SDK-backed handler once (see ShellRecordBridgeAdapter).
+        com.beamio.app.legacy.ShellRecordBridgeAdapter.install { applicationContext }
         BeamioNativeChatHooks.install(applicationContext)
         // The PWA pushes its own roster; the shell refreshes `getAllNodes` itself instead.
         BeamioChatPgpStore.onRosterUpsertFromWeb = { ctx -> BeamioGuardianRoster.kick(ctx) }
@@ -3464,7 +3621,7 @@ class MainActivity : ComponentActivity() {
         if (!::webView.isInitialized) return
         pendingDeepLinkHttps = null
         deepLinkApplied = true
-        // NFC card links are deprecated (PM R1664): a SUN URL from any entry (custom scheme, beamio_dl, install
+        // NFC card links are deprecated: a SUN URL from any entry (custom scheme, beamio_dl, install
         // referrer) is dropped here, never mapped into the app.
         if (isBlockedSunUri(https) || (BeamioDeepLink.unwrapAppDownloadLandingUri(https)?.let { isBlockedSunUri(it) } == true)) {
             if (BuildConfig.DEBUG) Log.i("BeamioDeepLink", "dropped NFC SUN link")
@@ -3519,8 +3676,10 @@ class MainActivity : ComponentActivity() {
 
     private fun mountEmbeddedWebView(jsBridge: CashTreesJsBridge) {
         useEmbeddedPwa = true
-        // Plan N (debug -PplanN=true only, R389: page record bridge is the SDK's): copy P before the WebView exists,
+        // Plan N (debug -PplanN=true only,: page record bridge is the SDK's): copy P before the WebView exists,
         // read the legacy PGP natively and hand it to the SDK's run(source).
+        // E9.11.29 r2: the legacy-store report is written before the WebView loads (background thread, bounded wait).
+        com.beamio.app.legacy.LegacyStoreReportShell.reportBeforeWebView(this)
         ShellRecordChannel.start(this, PgpMigrationRunner.Unavailable)
         val wv = createEmbeddedWebView(jsBridge, embeddedPwaHost)
         webView = wv
@@ -3537,7 +3696,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * PM R1574: shown only when no verified local bundle can be loaded. It says what happened, that nothing was deleted, and
+ *shown only when no verified local bundle can be loaded. It says what happened, that nothing was deleted, and
      * offers Retry, which runs the bootstrap again on the bootstrap executor (never the remote site, never clearing the bundle
      * or the wallet). On success the local UI replaces this page.
      */
@@ -3582,7 +3741,7 @@ class MainActivity : ComponentActivity() {
 
     /**
      * 主框架导航：拦截 NFC 卡上写入的 beamio SUN URL，不打开页面、不跳系统浏览器、不映射进应用。
-     * NFC 卡链接在消费者端已弃用（PM R1664）；新旧域名都阻断，规则见 [BeamioNfcSunBlock]（只用于阻断）。
+ * NFC 卡链接在消费者端已弃用（）；新旧域名都阻断，规则见 [BeamioNfcSunBlock]（只用于阻断）。
      */
     private fun shouldBlockBeamioNdefTopLevelNavigation(u: Uri, isMainFrame: Boolean): Boolean {
         if (!isMainFrame) return false
@@ -3591,10 +3750,10 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Main-frame SUN request in any shell WebView (embedded page, in-app browser and its popups, remote page): answered
-     * locally with an empty 204, so it opens nothing and never reaches the network or the system browser (PM R1664).
+ * locally with an empty 204, so it opens nothing and never reaches the network or the system browser .
      * Covers loadUrl as well as navigations.
      */
-    /** PM 2026-11-17: a main or sub request to the legacy parking host gets a 403 with no body (never forwarded). */
+    /** 2026-11-17: a main or sub request to the legacy parking host gets a 403 with no body (never forwarded). */
     private fun legacyHostBlockedResponse(request: WebResourceRequest): android.webkit.WebResourceResponse? {
         val u = request.url ?: return null
         if (!com.beamio.app.net.LegacyBeamioHostGuard.isLegacyHost(u.host)) return null
@@ -3625,11 +3784,12 @@ class MainActivity : ComponentActivity() {
             BeamioChatChannel.attach(
                 this,
                 onCommand = { json, deliver -> handleChatCommand(json, WalletCredentialGate.Channel.WEB_MESSAGE, deliver) },
-                // PM R2120: signing replies from window.BeamioChat go straight to delivery, never through the (possibly
+                // signing replies from window.BeamioChat go straight to delivery, never through the (possibly
                 // legacy) CashTreesAndroid bridge object, whose override refuses them.
                 onSignResponse = { json -> deliverChatSignResponse(json) },
             )
-            BeamioShellChannel.attach(this) { call -> handleShellCall(jsBridge, call) }
+            BeamioShellChannel.gateFor = { action -> ShellNoKeyGate.answer(action) }
+            BeamioShellChannel.attach(this) { call, gate -> handleShellCall(jsBridge, call, gate) }
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView,
@@ -3643,7 +3803,7 @@ class MainActivity : ComponentActivity() {
                     if (BuildConfig.DEBUG && u.host != "appassets.androidplatform.net") {
                         android.util.Log.i("BeamioQaNet", "req ${request.method} ${u.scheme}://${u.host}${u.path ?: ""}")
                     }
-                    // PM 2026-11-17: no page request to the legacy parking host beamio.app (its own local asset mapping still applies).
+                    // 2026-11-17: no page request to the legacy parking host beamio.app (its own local asset mapping still applies).
                     if (host.mapBeamioAppUrlToLocal(u) == null && com.beamio.app.net.LegacyBeamioHostGuard.isLegacyHost(u.host)) {
                         com.beamio.app.net.LegacyBeamioHostGuard.logSink(com.beamio.app.net.LegacyBeamioHostGuard.logLine(u.host, u.path))
                         return com.beamio.app.net.LegacyBeamioHostGuard.blockedResponse()
@@ -3664,7 +3824,7 @@ class MainActivity : ComponentActivity() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val u = request.url ?: return false
                     if (shouldBlockBeamioNdefTopLevelNavigation(u, request.isForMainFrame)) return true
-                    // PM 2026-11-17: navigation to the legacy parking host is cancelled (not loaded, not handed to a browser).
+                    // 2026-11-17: navigation to the legacy parking host is cancelled (not loaded, not handed to a browser).
                     if (com.beamio.app.net.LegacyBeamioHostGuard.cancelNavigation(u.host, u.path, host.mapBeamioAppUrlToLocal(u) != null)) return true
                     if (request.isForMainFrame) {
                         host.mapBeamioAppUrlToLocal(u)?.let { local ->
@@ -3691,12 +3851,12 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                    embeddedTopOrigin = ChatOriginGate.originOf(url) // PM R756: chat channel origin gate
+                    embeddedTopOrigin = ChatOriginGate.originOf(url) // chat channel origin gate
                     injectWebBridgeScripts(view, "onPageStarted")
                 }
 
                 override fun onPageFinished(view: WebView, url: String?) {
-                    embeddedTopOrigin = ChatOriginGate.originOf(url) // PM R756: chat channel origin gate
+                    embeddedTopOrigin = ChatOriginGate.originOf(url) // chat channel origin gate
                     host.injectVersionGlobals(view)
                     injectWebBridgeScripts(view, "onPageFinished")
                     applyTransparentStatusBar()
@@ -3825,7 +3985,7 @@ class MainActivity : ComponentActivity() {
             addJavascriptInterface(jsBridge, "CashTreesAndroid")
             addJavascriptInterface(CashTreesWebConsoleRelay.JsRelay(), CashTreesWebConsoleRelay.BRIDGE_NAME)
             CashTreesWebConsoleRelay.registerDocumentStartScript(this)
-            QaWriteGuard.installWebViewHooks(this) // debug QA builds only; no-op stub in release and store (PM R675)
+            QaWriteGuard.installWebViewHooks(this) // debug QA builds only; no-op stub in release and store
         }
     }
 

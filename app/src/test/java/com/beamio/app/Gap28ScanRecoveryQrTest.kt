@@ -26,7 +26,7 @@ class Gap28ScanRecoveryQrTest {
         }
     }
 
-    /** PM R820 (spec r3fr §25.52DR.4): the entry is removed from the shell; BeamioShell answers unknown_command. */
+    /** (spec r3fr §25.52DR.4): the entry is removed from the shell; BeamioShell answers unknown_command. */
     @Test
     fun scanRecoveryQrIsRemoved() {
         assertFalse(Regex("fun scanRecoveryQr\\(").containsMatchIn(src))

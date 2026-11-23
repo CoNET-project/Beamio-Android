@@ -28,7 +28,7 @@ object LegacySourceSelect {
 }
 
 /**
- * SDK page wallet copy (R399, r3bf): the first write of the page record comes from P, before the WebView starts.
+ * SDK page wallet copy (r3bf): the first write of the page record comes from P, before the WebView starts.
  * The SDK owns the store; the shell only hands over the old record without PGP private fields.
  */
 interface PageRecordImporter {
@@ -69,13 +69,13 @@ class ShellRecordState {
     @Volatile var migrating: Boolean = false
     /** Sub-code when page record initialisation is blocked (e.g. `wallet_copy_not_approved`, `record_unreadable`). */
     @Volatile var initBlocked: String? = null
-    /** Owner approval for a native copy of W class data (§25.52D.10). Not approved in this build. */
+    /** Approval for a native copy of W class data (§25.52D.10). Not approved in this build. */
     @Volatile var walletCopyApproved: Boolean = false
 }
 
 /**
  * A shell-side page record store. Only the debug reference code implements it (ShellRecordStore, src/debug); release
- * and store builds pass null because the SDK owns the page record (R389, PM R677).
+ * and store builds pass null because the SDK owns the page record .
  */
 interface LegacyPageStore {
     /** True when the shell already has a page record (an unreadable one counts as present). */
@@ -117,12 +117,12 @@ interface PgpMigrationRunner {
 class ShellRecordInit(
     private val webviewIdbDir: File,
     private val tempDir: File,
-    /** Native page record store, or null when the SDK owns the page record (R389): step 1 is then skipped. */
+    /** Native page record store, or null when the SDK owns the page record: step 1 is then skipped. */
     private val store: LegacyPageStore?,
     private val state: ShellRecordState,
     private val runner: PgpMigrationRunner,
     private val log: (String) -> Unit = {},
-    /** R389/R399: when the SDK owns the page record, the first write goes through this (store is then null). */
+    /** /: when the SDK owns the page record, the first write goes through this (store is then null). */
     private val importer: PageRecordImporter? = null,
     /** SDK 0.2.16: combined first-run import. When set, it replaces [importer] and [runner] for the P path. */
     private val firstRun: FirstRunImporter? = null,
@@ -144,6 +144,7 @@ class ShellRecordInit(
         val hasRecord = if (store != null) store.hasRecord()
         else importer?.hasRecord() == true || firstRunDone?.isFile == true
         if (hasRecord) { skippedDone = true; return } // P is never read again after the page has its own record
+        if (unknownRetriesExhausted()) return // bounded retry used up: no copy, no read; runSdk reports it (no marker)
         if (!webviewIdbDir.isDirectory) return
         tempDir.deleteRecursively()
         tempDir.mkdirs()
@@ -202,7 +203,36 @@ class ShellRecordInit(
         }
     }
 
+    /** Writes the marker for a definitive absent result (empty content: no address). P is never read again after it. */
+    private fun markDefinitiveAbsent() {
+        val m = firstRunDone ?: return
+        if (lastImportCode != "absent") return
+        runCatching { m.parentFile?.mkdirs(); m.writeText("") }
+    }
+
+    private fun attemptsFile(): File? = firstRunDone?.parentFile?.let { File(it, UNKNOWN_ATTEMPTS_FILE) }
+
+    private fun unknownRetriesExhausted(): Boolean {
+        val f = attemptsFile() ?: return false
+        return (runCatching { f.readText().trim().toInt() }.getOrNull() ?: 0) >= MAX_UNKNOWN_ATTEMPTS
+    }
+
+    private fun countUnknownAttempt() {
+        val f = attemptsFile() ?: return
+        val n = (runCatching { f.readText().trim().toInt() }.getOrNull() ?: 0) + 1
+        runCatching { f.parentFile?.mkdirs(); f.writeText(n.toString()) }
+    }
+
     companion object {
+        /**
+         * Bounded retry for an unknown legacy read (legacy-pwa-origin-migration.v1 LPO-04; v251 §270.3). Semantics, per the
+         * Rule: nativeReadPermitted=false for an unknown result means an unknown result is not a basis for native
+         * account determination. It does NOT mean "no further reads after the first unknown". Up to this many attempts are
+         * made, no marker is written, then native stops reading P.
+         */
+        const val MAX_UNKNOWN_ATTEMPTS = 3
+        private const val UNKNOWN_ATTEMPTS_FILE = "legacy-origin-unknown-attempts"
+
         /**
          * SDK 0.2.16 (r3bp) validates the address before it looks at Absent/Unreadable, but with no legacy record the shell has no
          * address. This syntactically valid placeholder only passes that check; the SDK binds nothing to it for Absent/Unreadable.
@@ -214,6 +244,14 @@ class ShellRecordInit(
     /** SDK 0.2.16 path: read P, then one `importFirstRun` call (page copy + PGP after import_ok). Old data is never written. */
     private fun runSdk(sdk: FirstRunImporter) {
         var record: LegacyRecord? = null
+        if (!skippedDone && unknownRetriesExhausted()) {
+            // Bounded retry used up for an unknown read: P is not read and no marker is written.
+            lastImportCode = null
+            log("first run: legacy origin unknown after $MAX_UNKNOWN_ATTEMPTS attempts; P not read")
+            state.migrating = false
+            sdk.setMigrationPending(false)
+            return
+        }
         try {
             if (skippedDone) {
                 // SDK 0.2.16 r3bs keeps the bound account only in memory; after a restart with no native key (G0) the page read fails.
@@ -231,18 +269,22 @@ class ShellRecordInit(
                 // No legacy store on this device: confirm the absence to the SDK (fresh install → page gets `absent`).
                 lastImportCode = sdk.importFirstRun(PLACEHOLDER_EOA, null, null, null)
                 log("first run: no P; confirmed absent → $lastImportCode")
+                markDefinitiveAbsent()
                 return
             }
             when (val r = LegacyPwaStore.read(src)) {
                 LegacyPwaStore.Result.NotFound -> {
                     lastImportCode = sdk.importFirstRun(PLACEHOLDER_EOA, null, null, null)
                     log("first run: P has no wallet record; confirmed absent → $lastImportCode")
+                    markDefinitiveAbsent()
                 }
                 is LegacyPwaStore.Result.Failed -> {
-                    // Old data stays as it is; the SDK records legacy_store_unreadable; the next launch retries.
+                    // Old data stays as it is; the SDK records legacy_store_unreadable. Unknown never writes the marker; the
+                    // read is retried on later launches up to MAX_UNKNOWN_ATTEMPTS, then native stops reading P (no marker).
                     state.initBlocked = "record_unreadable"
                     lastImportCode = sdk.importFirstRun(PLACEHOLDER_EOA, null, r.code, null)
-                    log("first run: P unreadable (${r.code}) → $lastImportCode; old data kept, retry next launch")
+                    countUnknownAttempt()
+                    log("first run: P unreadable (${r.code}) → $lastImportCode; old data kept, bounded retry")
                 }
                 is LegacyPwaStore.Result.Found -> {
                     record = r.record
@@ -273,7 +315,7 @@ class ShellRecordInit(
         }
     }
 
-    /** R399: hand the old record (no PGP private fields) to the SDK as the first page write; check the address. */
+    /**: hand the old record (no PGP private fields) to the SDK as the first page write; check the address. */
     private fun firstWriteToSdk(rec: LegacyRecord, importer: PageRecordImporter) {
         val primary = rec.pgpKeys().firstOrNull()?.profileIndex ?: 0
         val expected = rec.profileKeyId(primary)?.lowercase()

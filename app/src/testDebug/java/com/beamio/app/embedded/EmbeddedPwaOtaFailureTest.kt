@@ -13,7 +13,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * PM R1574: OTA failures (DNS, TLS, HTTP 500, non-JSON manifest, a manifest request that hangs) never touch active/, and the
+ *OTA failures (DNS, TLS, HTTP 500, non-JSON manifest, a manifest request that hangs) never touch active/, and the
  * local bootstrap still completes and serves active/ while a check is stuck. No real external host is contacted: DNS uses
  * the reserved `.invalid` TLD, the rest a loopback server.
  */
@@ -48,13 +48,13 @@ class EmbeddedPwaOtaFailureTest {
     private fun assertUntouched(before: Map<String, Int>, case: String) {
         assertEquals(case, before, snapshot())
         assertFalse("$case: no staging", File(root, "staging").exists())
-        println("EVIDENCE r1574 OTA $case -> active unchanged (${before.size} files), no staging")
+        println("EVIDENCE OTA $case -> active unchanged (${before.size} files), no staging")
     }
 
     @Test
     fun dnsFailureKeepsActive() {
         val s = store(); s.bootstrapIfNeeded(); val before = snapshot()
-        daemon(s, "https://r1574-dns-failure.invalid/app/update.json").performCheck()
+        daemon(s, "https://dns-failure.invalid/app/update.json").performCheck()
         assertUntouched(before, "DNS failure")
     }
 

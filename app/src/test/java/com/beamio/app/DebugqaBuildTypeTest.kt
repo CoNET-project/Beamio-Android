@@ -5,18 +5,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** Spec §25.52HD (HD.1–HD.3, PM R2088): the debugqa build type is the approved S25 QA build and declares nothing itself. */
+/** Spec §25.52HD (HD.1–HD.3): the debugqa build type is the approved S25 QA build and declares nothing itself. */
 class DebugqaBuildTypeTest {
     private val g = File("build.gradle.kts").readText()
 
     @Test
     fun debugqaIsT168DebugKeyAndLabelled() {
         assertTrue(g.contains("create(\"debugqa\") {"))
-        assertTrue(g.contains("onVariants(selector().withBuildType(\"debugqa\")) { variant -> variant.applicationId.set(\"com.beamio.app.t168\") }"))
+        assertTrue(g.contains("onVariants(selector().withBuildType(\"debugqa\")) { variant ->"))
+        assertTrue(g.contains("variant.applicationId.set(\"com.beamio.app.t168\")"))
         val block = g.substringAfter("create(\"debugqa\") {").substringBefore("\n        }")
         assertTrue(block.contains("signingConfig = signingConfigs.getByName(\"debug\")"))
         assertFalse(block.contains("signingConfigs.getByName(\"release\")"))
-        assertTrue(block.contains("versionNameSuffix = \"-debugqa\""))
+        // Naming rule: versionName stays pure dotted digits; the QA label is QA_BUILD_LABEL only.
+        assertFalse(block.contains("versionNameSuffix"))
         assertTrue(block.contains("buildConfigField(\"String\", \"QA_BUILD_LABEL\", \"\\\"debugqa\\\"\")"))
     }
 
@@ -27,17 +29,19 @@ class DebugqaBuildTypeTest {
         assertTrue(g.contains("dependsOn(verifyDebugqaNotInReleaseOrStore)"))
     }
 
-    /** Reviewer on f1cac906: debugqa uses debug's code/manifest/NSC but refuses the two debug-only add-ons explicitly. */
+    /** debugqa uses debug's code/manifest/NSC but refuses the two debug-only add-ons explicitly. */
     @Test
     fun debugqaRefusesTheDebugOnlyAddOns() {
-        assertTrue(g.contains("if ((otaLocalStub || chatQaHooks) && gradle.startParameter.taskNames.any { it.contains(\"debugqa\", ignoreCase = true) }) {"))
+        assertTrue(g.contains("if ((otaLocalStub || chatQaHooks) && gradle.startParameter.taskNames.any { it.contains(\"debugqa\", ignoreCase = true) } &&"))
         val ss = g.substringAfter("maybeCreate(\"debugqa\").let {").substringBefore("\n        }")
         assertTrue(ss.contains("listOf(\"src/debug/java\", \"src/ota/java\")"))
         assertTrue(ss.contains("it.manifest.srcFile(\"src/debug/AndroidManifest.xml\")"))
-        assertFalse(ss.contains("otaLocalStub")); assertFalse(ss.contains("qaHooks"))
+        // Strip the one exception-condition line (its flag name is the only place that could carry a qaHooks substring), then the rest must not mention qaHooks.
+        val ssNoExc = ss.replace("if (chatQaHooks && t168ReadFaultAllowed) {", "")
+        assertFalse(ss.contains("otaLocalStub")); assertFalse(ssNoExc.contains("qaHooks"))
     }
 
-    /** PM R2102 (R2099 gap): the legacy sensitive bridge is off by default in every build type, debug and debugqa included. */
+    /** (gap): the legacy sensitive bridge is off by default in every build type, debug and debugqa included. */
     @Test
     fun legacySensitiveBridgeIsOffByDefaultEverywhere() {
         assertTrue(g.contains("val legacyDebug = legacySensitiveBridgeProp == \"true\""))

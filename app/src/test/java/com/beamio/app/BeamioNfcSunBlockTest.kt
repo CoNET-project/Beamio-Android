@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** PM R1664/R1675/R1678: NFC card links are deprecated; SUN URLs are blocked on any host containing beamio.app/beamio.ca. */
+/**: NFC card links are deprecated; SUN URLs are blocked on any host containing beamio.app/beamio.ca. */
 class BeamioNfcSunBlockTest {
     private val sunQuery = setOf("uid", "e", "c", "m")
 
@@ -14,7 +14,7 @@ class BeamioNfcSunBlockTest {
     fun sunUrlsAreBlockedOnBothDomainsSubdomainsAndLookalikes() {
         for (h in listOf(
             "beamio.app", "www.beamio.app", "pos.beamio.app", "beamio.ca", "www.beamio.ca", "pos.beamio.ca", "BEAMIO.CA",
-            // R1678: block-only wide match, lookalikes included
+            // block-only wide match, lookalikes included
             "beamio.app.evil.com", "beamio.ca.evil.com", "notbeamio.app", "xbeamio.ca", "evil-beamio.app.example",
         )) {
             assertTrue("$h /api/sun", BeamioNfcSunBlock.isBlockedSunUrl(h, "/api/sun", emptySet()))
@@ -23,13 +23,13 @@ class BeamioNfcSunBlockTest {
         }
     }
 
-    /** PM R1675/R1681: cashtrees.beamio.app and its subdomains stay exempt (exact names); lookalikes are blocked. */
+    /**: cashtrees.beamio.app and its subdomains stay exempt (exact names); lookalikes are blocked. */
     @Test
     fun cashtreesKeepsThePreMigrationExclusion() {
         for (h in listOf("cashtrees.beamio.app", "CASHTREES.BEAMIO.APP", "x.cashtrees.beamio.app")) {
             assertFalse(h, BeamioNfcSunBlock.isBlockedSunUrl(h, "/api/sun", sunQuery))
         }
-        // R1681: the substring bypass is closed; lookalikes that contain the whole string are blocked.
+        // the substring bypass is closed; lookalikes that contain the whole string are blocked.
         for (h in listOf("cashtrees.beamio.app.evil.example", "x-cashtrees.beamio.app.evil.com", "evilcashtrees.beamio.app", "cashtrees.beamio.app-evil.com", "cashtrees.beamio.ca")) {
             assertTrue(h, BeamioNfcSunBlock.isBlockedSunUrl(h, "/api/sun", sunQuery))
         }
@@ -46,7 +46,7 @@ class BeamioNfcSunBlockTest {
         assertFalse(BeamioNfcSunBlock.isBlockedSunUrl(null, "/api/sun", sunQuery))
     }
 
-    /** The wide match is for blocking only: the allow list stays exact (PM R1678). */
+    /** The wide match is for blocking only: the allow list stays exact . */
     @Test
     fun allowListDoesNotUseTheWideMatch() {
         for (h in listOf("beamio.app.evil.com", "pos.beamio.ca", "notbeamio.app")) assertFalse(h, BeamioWebHosts.isWebHost(h))
@@ -66,7 +66,7 @@ class BeamioNfcSunBlockTest {
         assertTrue("remote page intercept", main.contains("sunBlockedMainFrameResponse(request) ?: QaWriteGuard.intercept(request, \"remote\")"))
         assertTrue("embedded page intercept", main.contains("sunBlockedMainFrameResponse(request)?.let { return it }"))
         assertEquals("in-app browser overrides and popup route", 3, Regex("""isBlockedSunUri\(next\)""").findAll(main).count())
-        // PM R1703: external launches. Bridge openURL refuses SUN; every startActivity passes the SUN gate first.
+        // external launches. Bridge openURL refuses SUN; every startActivity passes the SUN gate first.
         val ext = main.substringAfter("private fun openExternalUrlFromBridge(raw: String) {").substringBefore("startActivity(")
         assertTrue("bridge openURL refuses SUN before any launch", ext.contains("isBlockedSunUri(uri)) return"))
         // Both external openers go through that function (and then through the startActivity gate).

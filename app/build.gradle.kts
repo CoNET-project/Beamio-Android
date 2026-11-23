@@ -3,6 +3,8 @@ import java.security.MessageDigest
 import java.util.Properties
 import java.util.zip.ZipFile
 
+import java.util.Collections
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.google.services)
@@ -28,12 +30,63 @@ val otaLocalStub = providers.gradleProperty("otaManifestUrl").orNull != null
 // Native key import binding (spec 25.25): the SDK side compiles only against the unreleased 0.2.7 line.
 // Default: src/nativekeyNone (no native key, import unavailable, shell gate passes everything through).
 val chatSdkNativeKey = providers.gradleProperty("chatSdkNativeKey").orNull == "true"
-// PM R2079: the chat SDK version and its AAR SHA-256 are pinned in app/chat-sdk.lock. -PchatSdkVersion may be omitted;
+// Release rule (2026-11-17): a release or store build must mount BeamioShellRecord, i.e. use the nativekeySdk line. A build without it
+// is a degraded shell, and no degraded shell may be published (project rule). The check runs at configuration for any requested
+// release-type task, so no package is produced by the default (nativekeyNone) variant.
+// Artifact-level check (2026-11-17): the release APK or AAB must contain the native-key binding that mounts BeamioShellRecord.
+// The check reads the built artifact's dex entries and looks for the binding's class descriptor. R8 keeps the class under its own
+// name (-keep rule above), so the descriptor is present only when the class is in the package. Each task checks its own output.
+fun checkNativeKeyDex(artifact: File) {
+    if (!artifact.isFile) throw GradleException("release artifact missing: ${artifact.path}")
+    val needle = "com/beamio/app/nativekey/NativeKeySdkBinding".toByteArray(Charsets.UTF_8)
+    fun contains(hay: ByteArray, pat: ByteArray): Boolean {
+        outer@ for (i in 0..hay.size - pat.size) {
+            for (j in pat.indices) if (hay[i + j] != pat[j]) continue@outer
+            return true
+        }
+        return false
+    }
+    var dexCount = 0
+    var hits = 0
+    ZipFile(artifact).use { zf ->
+        for (e in Collections.list(zf.entries())) {
+            if (!e.name.endsWith(".dex")) continue
+            dexCount++
+            if (contains(zf.getInputStream(e).use { it.readBytes() }, needle)) hits++
+        }
+    }
+    if (dexCount == 0 || hits == 0) {
+        throw GradleException("release artifact ${artifact.name} lacks NativeKeySdkBinding (dex entries=$dexCount): BeamioShellRecord is not mounted (release rule 2026-11-17)")
+    }
+}
+val verifyNativeKeyMountedApk = tasks.register("verifyNativeKeyMountedApk") {
+    doLast { checkNativeKeyDex(layout.buildDirectory.file("outputs/apk/release/app-release.apk").get().asFile) }
+}
+val verifyNativeKeyMountedAab = tasks.register("verifyNativeKeyMountedAab") {
+    doLast { checkNativeKeyDex(layout.buildDirectory.file("outputs/bundle/release/app-release.aab").get().asFile) }
+}
+tasks.matching { it.name == "assembleRelease" }.configureEach { finalizedBy(verifyNativeKeyMountedApk) }
+tasks.matching { it.name == "bundleRelease" }.configureEach { finalizedBy(verifyNativeKeyMountedAab) }
+
+// The check looks at the whole task graph of this project, not only the requested names: a bundle or assemble aggregate
+// (bundle, assemble, build, install, publish, package, check) reaches the release variant too, so it counts as release-like.
+gradle.taskGraph.whenReady {
+    val releaseLike = allTasks.any { t ->
+        t.project == project && (
+            Regex("(?i)(release|store)").containsMatchIn(t.name) ||
+                Regex("^(assemble|bundle|build|install|publish|package|check|lint)$").matches(t.name)
+            )
+    }
+    if (releaseLike && !chatSdkNativeKey) {
+        throw GradleException("release/store artifact tasks require -PchatSdkNativeKey=true (BeamioShellRecord must be mounted; release rule 2026-11-17).")
+    }
+}
+// the chat SDK version and its AAR SHA-256 are pinned in app/chat-sdk.lock. -PchatSdkVersion may be omitted;
 // when given it must equal the lock. verifyChatSdkLock checks the resolved AAR bytes on every build.
 val chatSdkLock: Map<String, String> = file("chat-sdk.lock").takeIf { it.isFile }?.readLines()
     ?.filter { it.isNotBlank() && !it.trimStart().startsWith("#") && it.contains("=") }
     ?.associate { it.substringBefore("=").trim() to it.substringAfter("=").trim() }
-    ?: throw GradleException("app/chat-sdk.lock missing: the chat SDK must be pinned (PM R2079).")
+    ?: throw GradleException("app/chat-sdk.lock missing: the chat SDK must be pinned.")
 val chatSdkLockedVersion: String = chatSdkLock["chat_sdk_version"]?.takeIf { it.isNotBlank() }
     ?: throw GradleException("app/chat-sdk.lock has no chat_sdk_version")
 val chatSdkLockedSha: String = chatSdkLock["chat_sdk_aar_sha256"]?.lowercase()?.takeIf { Regex("^[0-9a-f]{64}$").matches(it) }
@@ -42,28 +95,33 @@ val chatSdkLockedQa = chatSdkLock["chat_sdk_qa"] == "true"
 val chatSdkVersion: String = providers.gradleProperty("chatSdkVersion").orNull?.also {
     if (it != chatSdkLockedVersion) throw GradleException("-PchatSdkVersion=$it is not the pinned $chatSdkLockedVersion in app/chat-sdk.lock (update the lock in its own reviewed commit).")
 } ?: chatSdkLockedVersion
-// QA write guard (PM / PWA integration 2026-11-14): -PqaWriteGuard=true turns it on in debug builds only.
+// QA write guard (PWA integration, 2026-11-14): -PqaWriteGuard=true turns it on in debug builds only.
 // Release and store builds always get false.
 val qaWriteGuard = providers.gradleProperty("qaWriteGuard").orNull == "true"
-// Plan N page record + legacy PGP migration (spec r3ay 25.52D). PM R675 (2026-11-14, spec r3cx §25.52AZ.4): the
+// Plan N page record + legacy PGP migration (spec r3ay 25.52D). (2026-11-14, spec r3cx §25.52AZ.4): the
 // window.BeamioShellRecord channel is part of release and store builds. Debug builds have it too unless -PplanN=false.
 val planN = providers.gradleProperty("planN").orNull != "false"
-// PM R766/R771/R789/R826: the sensitive CashTreesAndroid methods live on window.BeamioShell / window.BeamioChat
+// the sensitive CashTreesAndroid methods live on window.BeamioShell / window.BeamioChat
 // (spec §25.52AA.11). CashTreesJsBridgeLegacy re-exposes them on CashTreesAndroid for pages that have not switched.
-// Defaults: false in every build type (PM R2102, after R2099 found any iframe could reach chatModuleCommand /
+// Defaults: false in every build type (any iframe could reach chatModuleCommand /
 // chatModuleSignResponse through it); debug/debugqa and release can still opt in with -PlegacySensitiveBridge=true for a QA
-// probe; store is always false (no override). A build with it on is a QA artifact, never a release package (DR.3, R788).
+// probe; store is always false (no override). A build with it on is a QA artifact, never a release package (DR.3).
 // The 0.53.x page prefers window.BeamioChat and only falls back to CashTreesAndroid when BeamioChat is missing.
 val legacySensitiveBridgeProp = providers.gradleProperty("legacySensitiveBridge").orNull
 val legacyDebug = legacySensitiveBridgeProp == "true"
 val legacyRelease = legacySensitiveBridgeProp == "true"
-// QA native evidence page (PM R591, §25.37.4 A5): -PchatQaHooks compiles src/qaHooks into debug builds only and swaps in
+// QA native evidence page (§25.37.4 A5): -PchatQaHooks compiles src/qaHooks into debug builds only and swaps in
 // src/qaHooksDebug/AndroidManifest.xml. Release and store never get it; scripts/verify-android-no-qa-hooks.sh checks the APKs.
 val chatQaHooks = providers.gradleProperty("chatQaHooks").isPresent
+// QA exception (2026-11-22): the only debugqa exception for -PchatQaHooks (t168 read-fault package). Defined next to chatQaHooks.
+val t168ReadFaultAllowed = providers.gradleProperty("allowQaHooksOnDebugqa").orNull == "t168-read-fault"
+if (providers.gradleProperty("allowQaHooksOnDebugqa").isPresent && !t168ReadFaultAllowed) {
+    throw GradleException("-PallowQaHooksOnDebugqa only accepts the value t168-read-fault.")
+}
 if (chatQaHooks && !chatSdkNativeKey) throw GradleException("-PchatQaHooks needs the native-key SDK line (-PchatSdkNativeKey=true).")
-// QA only (R551): debug builds use release-like cleartext rules so the chat SDK can reach node IPs over HTTP.
+// QA only: debug builds use release-like cleartext rules so the chat SDK can reach node IPs over HTTP.
 val qaCleartextNsc = providers.gradleProperty("qaCleartextNsc").orNull == "true"
-// AH.6 item 3 (PM R639/R642, spec r3ck §25.52AM.2): -PqaReleaseVariant=true builds the release type unchanged except for
+// AH.6 item 3 (spec r3ck §25.52AM.2): -PqaReleaseVariant=true builds the release type unchanged except for
 // applicationId com.beamio.app.t168r and the debug signing key, so it installs beside t168; androidTest then targets it.
 // No QA switch may be combined with it.
 val qaReleaseVariant = providers.gradleProperty("qaReleaseVariant").orNull == "true"
@@ -109,7 +167,7 @@ val pwaCapabilities: List<String> = run {
     }
     list.distinct().sorted()
 }
-// PM R2042: bits from a QA candidate manifest are QA only. The store build type takes capability bits only from a freeze
+// bits from a QA candidate manifest are QA only. The store build type takes capability bits only from a freeze
 // manifest (which, per §25.52Y.43 item 3, carries them only with an acceptance_ref); from a QA manifest it gets none.
 val pwaCapabilitiesFromFreeze = providers.gradleProperty("pwaFreezeManifest").orNull != null
 val keystoreProperties = Properties()
@@ -132,8 +190,8 @@ android {
         applicationId = if (qaReleaseVariant) "com.beamio.app.t168r" else "com.beamio.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 173
-        versionName = "1.0.165"
+        versionCode = 186
+        versionName = "1.0.168"
 
         // t168r (AH.6 item 3): a plain framework Instrumentation, since the minified release app lacks androidx.tracing.
         testInstrumentationRunner = if (qaReleaseVariant) "com.beamio.app.ah6.Ah6BridgeInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"
@@ -159,7 +217,7 @@ android {
         getByName("debug").let { it.java.directories.add("src/ota/java"); it.kotlin.directories.add("src/ota/java") }
         getByName("release").let { it.java.directories.add("src/ota/java"); it.kotlin.directories.add("src/ota/java") }
         maybeCreate("store").let { it.java.directories.add("src/noota/java"); it.kotlin.directories.add("src/noota/java") }
-        // PM R675: the QA write guard lives in src/debug; release and store get a no-op stub with the same calls.
+        // the QA write guard lives in src/debug; release and store get a no-op stub with the same calls.
         getByName("release").let { it.java.directories.add("src/qaGuardStub/java"); it.kotlin.directories.add("src/qaGuardStub/java") }
         maybeCreate("store").let { it.java.directories.add("src/qaGuardStub/java"); it.kotlin.directories.add("src/qaGuardStub/java") }
         getByName("debug").res.directories.add(if (qaCleartextNsc) "src/qaCleartextNsc/res" else if (otaLocalStub) "src/otaLocalStub/res" else "src/otaDefaultNsc/res")
@@ -167,11 +225,17 @@ android {
             it.java.directories.add("src/qaHooks/java"); it.kotlin.directories.add("src/qaHooks/java")
             it.manifest.srcFile("src/qaHooksDebug/AndroidManifest.xml")
         }
-        // Spec §25.52HD (HD.1, PM R2088): debugqa is the debug build under the approved name; same QA code and manifest as debug.
+        // Spec §25.52HD (HD.1): debugqa is the debug build under the approved name; same QA code and manifest as debug.
         maybeCreate("debugqa").let {
             for (d in listOf("src/debug/java", "src/ota/java")) { it.java.directories.add(d); it.kotlin.directories.add(d) }
             it.manifest.srcFile("src/debug/AndroidManifest.xml")
             it.res.directories.add(if (qaCleartextNsc) "src/qaCleartextNsc/res" else "src/otaDefaultNsc/res")
+            // QA exception: the t168 read-fault package only (-PchatQaHooks with -PallowQaHooksOnDebugqa=t168-read-fault): the independent
+            // qaReadFault source set and its manifest; the QA evidence page is NOT compiled here.
+            if (chatQaHooks && t168ReadFaultAllowed) {
+                it.java.directories.add("src/qaReadFault/java"); it.kotlin.directories.add("src/qaReadFault/java")
+                it.manifest.srcFile("src/qaReadFault/AndroidManifest.xml")
+            }
         }
         val nativeKeyDir = if (chatSdkNativeKey) "src/nativekeySdk/java" else "src/nativekeyNone/java"
         getByName("main").let { it.java.directories.add(nativeKeyDir); it.kotlin.directories.add(nativeKeyDir) }
@@ -196,7 +260,7 @@ android {
         debug {
             buildConfigField("boolean", "QA_WRITE_GUARD", qaWriteGuard.toString())
             buildConfigField("boolean", "PLAN_N", planN.toString())
-            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", legacyDebug.toString()) // R2102: default false; opt-in QA probe only
+            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", legacyDebug.toString()) // default false; opt-in QA probe only
             buildConfigField("boolean", "REMOTE_PWA_UPDATE", remotePwaUpdate.toString())
             buildConfigField("String", "OTA_MANIFEST_URL", "\"$otaManifestUrl\"")
             buildConfigField("String", "OTA_BUNDLE_BASE", "\"$otaBundleBase\"")
@@ -209,8 +273,8 @@ android {
         }
         release {
             buildConfigField("boolean", "QA_WRITE_GUARD", "false")
-            buildConfigField("boolean", "PLAN_N", "true") // PM R675: plan N channel in release/store
-            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", legacyRelease.toString()) // R826 d: default false
+            buildConfigField("boolean", "PLAN_N", "true") // plan N channel in release/store
+            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", legacyRelease.toString()) // default false
             buildConfigField("boolean", "REMOTE_PWA_UPDATE", remotePwaUpdate.toString())
             buildConfigField("String", "OTA_MANIFEST_URL", "\"$otaManifestUrl\"")
             buildConfigField("String", "OTA_BUNDLE_BASE", "\"$otaBundleBase\"")
@@ -228,7 +292,7 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
-        // Spec §25.52HD.1/HD.2 (owner's written approval R1249, PM R2088): the internal QA build named `debugqa`, only for the
+        // Spec §25.52HD.1/HD.2 (written approval): the internal QA build named `debugqa`, only for the
         // Samsung S25, application id com.beamio.app.t168 (forced below), debug key only (never the store certificate), with the
         // QA chat SDK of app/chat-sdk.lock and the QA manifest's capability bits. It declares nothing by itself: per HD.3 a
         // capability such as the native-keys bit comes only from the SDK build. Not for release, store or anyone outside.
@@ -236,7 +300,7 @@ android {
             initWith(getByName("debug"))
             matchingFallbacks += listOf("debug")
             isDebuggable = true
-            versionNameSuffix = "-debugqa"
+            // Naming rule: versionName stays pure dotted digits; the QA label is carried by QA_BUILD_LABEL, not the name.
             signingConfig = signingConfigs.getByName("debug")
             buildConfigField("String", "QA_BUILD_LABEL", "\"debugqa\"")
         }
@@ -245,13 +309,13 @@ android {
             matchingFallbacks += listOf("release")
             buildConfigField("boolean", "REMOTE_PWA_UPDATE", "false")
             buildConfigField("boolean", "QA_WRITE_GUARD", "false")
-            buildConfigField("boolean", "PLAN_N", "true") // PM R675: plan N channel in release/store
-            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", "false") // R826 d: store never re-exposes them
+            buildConfigField("boolean", "PLAN_N", "true") // plan N channel in release/store
+            buildConfigField("boolean", "LEGACY_SENSITIVE_BRIDGE", "false") // store never re-exposes them
             // initWith copied the OTA fields from release: blank them so no update URL reaches store.
             buildConfigField("String", "OTA_MANIFEST_URL", "\"\"")
             buildConfigField("String", "OTA_BUNDLE_BASE", "\"\"")
             buildConfigField("long", "OTA_CHECK_INTERVAL_MS", "0L")
-            // PM R2042: QA-manifest capability bits never reach a store build.
+            // QA-manifest capability bits never reach a store build.
             if (!pwaCapabilitiesFromFreeze) {
                 buildConfigField("String", "PWA_CAPABILITIES", "\"\"")
                 buildConfigField("String", "PWA_CAPABILITIES_ZIP_SHA256", "\"\"")
@@ -317,7 +381,7 @@ val verifyPwaEmbedLock by tasks.registering(Exec::class) {
 tasks.named("preBuild") { dependsOn(verifyPwaEmbedLock) }
 
 /**
- * PWA version gate (owner rule 2026-11-11): the shell must embed the latest
+ * PWA version gate (since 2026-11-11): the shell must embed the latest
  * released PWA (live https://beamio.ca/app/update.json, same ZIP bytes) or a
  * strictly higher version that is an approved release or an explicit
  * unreleased test. Runs scripts/verify-shell-pwa-version.sh on every build;
@@ -328,7 +392,7 @@ tasks.named("preBuild") { dependsOn(verifyPwaEmbedLock) }
  *                            script: an unreleased PWA goes in only as the frozen build in the
  *                            manifest (status "frozen", embedded ZIP sha256 and version equal to
  *                            its zip_sha256 and version), checked before the shared checker runs.
- *   QA candidate (NOT FROZEN, PM R509): -PpwaUnreleasedTest=true -PpwaQaManifest=<qa manifest JSON>
+ * QA candidate (NOT FROZEN): -PpwaUnreleasedTest=true -PpwaQaManifest=<qa manifest JSON>
  *                            (status "qa-candidate", not_frozen true, freeze_kind "qa-candidate-not-frozen"; the
  *                            embedded ZIP sha256 and version must equal its zip_sha256 and version). Verdict QA only.
  */
@@ -338,7 +402,32 @@ val pwaQaManifest = providers.gradleProperty("pwaQaManifest").orNull
 if (pwaUnreleasedTest) {
     android.defaultConfig.versionNameSuffix = "-pwa-unreleased-test"
 }
-val verifyShellPwaVersion by tasks.registering(Exec::class) {
+// Gate pins (ORDER 2026-11-21T2335Z): the shared PWA gate scripts must be byte-identical to the pinned SHA-256 values in
+// scripts/gate-pins.sha256 before any PWA gate runs. A mismatch refuses the build.
+val verifyPwaGatePins by tasks.registering {
+    group = "verification"
+    description = "Fail unless the PWA gate scripts match scripts/gate-pins.sha256"
+    doFirst {
+        val pins = rootProject.file("scripts/gate-pins.sha256")
+        if (!pins.isFile) throw GradleException("gate pins missing: $pins (build refused)")
+        var checked = 0
+        pins.readLines().filter { it.isNotBlank() && !it.startsWith("#") }.forEach { line ->
+            val parts = line.trim().split(Regex("\\s+"))
+            if (parts.size != 2) throw GradleException("bad gate pin line: $line")
+            val want = parts[0].lowercase()
+            val name = parts[1]
+            val f = rootProject.file("scripts/$name")
+            if (!f.isFile) throw GradleException("gate script missing: $f (build refused)")
+            val got = MessageDigest.getInstance("SHA-256").digest(f.readBytes()).joinToString("") { "%02x".format(it) }
+            if (got != want) throw GradleException("gate script $name sha256 $got is not the pinned $want (build refused)")
+            checked++
+        }
+        if (checked == 0) throw GradleException("gate pins file lists no scripts (build refused)")
+    }
+}
+
+val verifyShellPwaVersion by tasks.registering {
+    dependsOn(verifyPwaGatePins)
     group = "verification"
     description = "Fail unless the embedded PWA is the released one, an approved higher release, or a marked unreleased test"
     val gate = rootProject.file("scripts/verify-shell-pwa-version.sh")
@@ -418,7 +507,37 @@ val verifyShellPwaVersion by tasks.registering(Exec::class) {
         } else if (pwaFreezeManifest != null || pwaQaManifest != null) {
             throw GradleException("-PpwaFreezeManifest and -PpwaQaManifest are only used with -PpwaUnreleasedTest=true.")
         }
-        commandLine(args)
+        // Caller contract (ORDER 2026-11-21T2335Z items 2-4): run the gate, run the single-ZIP gate, then let
+        // scripts/android-gate-decision.sh decide. Variant comes from the requested tasks; release accepts only exit 0.
+        val gateRc = ProcessBuilder(args).directory(rootProject.projectDir).inheritIO().start().waitFor()
+        val zipSha = MessageDigest.getInstance("SHA-256").digest(File(appDir, "src/main/assets/SilentPassUI.zip").readBytes())
+            .joinToString("") { "%02x".format(it) }
+        val singleZipRc = ProcessBuilder(
+            rootProject.file("scripts/verify-android-single-zip.sh").path, "prebuild",
+            "--app-dir", appDir.path, "--sha256", zipSha,
+        ).directory(rootProject.projectDir).inheritIO().start().waitFor()
+        val taskNames = gradle.startParameter.taskNames.joinToString(" ")
+        val isRelease = listOf("Release", "Store", "Bundle").any { taskNames.contains(it, ignoreCase = true) }
+        val variant = when {
+            isRelease -> "release"
+            taskNames.contains("Debugqa", ignoreCase = true) -> "debugqa"
+            else -> "unknown"
+        }
+        val qaRequested = pwaUnreleasedTest && pwaQaManifest != null
+        val decision = ProcessBuilder(
+            rootProject.file("scripts/android-gate-decision.sh").path,
+            "--variant", variant,
+            "--qa-requested", if (qaRequested) "1" else "0",
+            // debugqa t168 frozen wiring (2026-11-22): a frozen input is either -PpwaFreezeManifest or the shell-root
+            // app/pwa-freeze-manifest.json (delegated freeze). Never with a QA manifest (the QA path keeps its frozen=0 contract).
+            "--frozen-requested",
+            if (pwaFreezeManifest != null || (!qaRequested && file("pwa-freeze-manifest.json").isFile)) "1" else "0",
+            "--gate-rc", gateRc.toString(),
+            "--singlezip-rc", singleZipRc.toString(),
+        ).directory(rootProject.projectDir).inheritIO().start().waitFor()
+        if (decision != 0) {
+            throw GradleException("PWA gate refused (gate rc=$gateRc, single-ZIP rc=$singleZipRc, variant=$variant, qa=$qaRequested)")
+        }
     }
 }
 tasks.named("preBuild") { dependsOn(verifyShellPwaVersion) }
@@ -451,7 +570,7 @@ tasks.configureEach {
 afterEvaluate { verifyStoreNoOta.configure { dependsOn("minifyStoreWithR8") } }
 
 /**
- * PM R2079: the resolved chat SDK AAR must have the SHA-256 pinned in app/chat-sdk.lock. Runs before every build; there is
+ * The resolved chat SDK AAR must have the SHA-256 pinned in app/chat-sdk.lock. Runs before every build; there is
  * no skip property. A QA-only lock (chat_sdk_qa=true) also blocks packaging a store APK or AAB.
  */
 val verifyChatSdkLock by tasks.registering {
@@ -482,7 +601,7 @@ tasks.configureEach {
 }
 
 /**
- * Spec §25.52HD (PM R2088): debugqa is the approved S25 QA build only. It cannot be combined with the release-QA probe
+ * Spec §25.52HD: debugqa is the approved S25 QA build only. It cannot be combined with the release-QA probe
  * variant (whose id is t168r), and a debugqa product must not reach a release or store artifact.
  */
 if (qaReleaseVariant && gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
@@ -490,8 +609,16 @@ if (qaReleaseVariant && gradle.startParameter.taskNames.any { it.contains("debug
 }
 // debugqa takes debug's QA code, manifest and NSC, but not the two optional debug add-ons (the 10.0.2.2 OTA stub NSC of
 // -PotaManifestUrl and the -PchatQaHooks hooks): asking for debugqa with either switch fails instead of silently differing.
-if ((otaLocalStub || chatQaHooks) && gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
-    throw GradleException("debugqa does not take -PotaManifestUrl or -PchatQaHooks (debug-only test add-ons); build debugqa without them.")
+// QA exception (2026-11-22): one narrow exception for the t168 read-fault QA package only. -PallowQaHooksOnDebugqa=t168-read-fault
+// lets debugqa take -PchatQaHooks; without it the exclusion above stays as before. The OTA stub is never allowed on debugqa.
+// -PallowQaHooksOnDebugqa is meaningful only for a debugqa run; a release or store run never takes it.
+if (providers.gradleProperty("allowQaHooksOnDebugqa").isPresent &&
+    !gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) }) {
+    throw GradleException("-PallowQaHooksOnDebugqa is only for a debugqa run (t168 read-fault package); it is refused for release and store.")
+}
+if ((otaLocalStub || chatQaHooks) && gradle.startParameter.taskNames.any { it.contains("debugqa", ignoreCase = true) } &&
+    !(chatQaHooks && !otaLocalStub && t168ReadFaultAllowed)) {
+    throw GradleException("debugqa does not take -PotaManifestUrl or -PchatQaHooks (debug-only test add-ons); build debugqa without them, or for the t168 read-fault package use -PchatQaHooks=true -PallowQaHooksOnDebugqa=t168-read-fault.")
 }
 val verifyDebugqaNotInReleaseOrStore by tasks.registering {
     group = "verification"
@@ -512,8 +639,14 @@ tasks.configureEach {
 // (testStoreUnitTest proves the update daemon is not on the store classpath).
 androidComponents {
     // HD.1: the debugqa application id is exactly com.beamio.app.t168.
-    onVariants(selector().withBuildType("debugqa")) { variant -> variant.applicationId.set("com.beamio.app.t168") }
-    // PM R677: release also gets host unit tests (src/testRelease checks the release build shape).
+    onVariants(selector().withBuildType("debugqa")) { variant ->
+        variant.applicationId.set("com.beamio.app.t168")
+        // QA exception: the read-fault package must be the t168 identity, never the personal main package.
+        if (chatQaHooks && t168ReadFaultAllowed && variant.applicationId.get() != "com.beamio.app.t168") {
+            throw GradleException("t168 read-fault package must use applicationId com.beamio.app.t168 (got ${variant.applicationId.get()})")
+        }
+    }
+    // release also gets host unit tests (src/testRelease checks the release build shape).
     beforeVariants(selector().withBuildType("release")) { variant ->
         (variant as? com.android.build.api.variant.HasHostTestsBuilder)
             ?.hostTests?.get(com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE)
@@ -544,7 +677,7 @@ tasks.register<Exec>("launchDebug") {
 dependencies {
     // Native Conet Chat module (listen / send / history / presence / hybrid signing).
     // Same role as the SwiftPM `chat-sdk-ios` package: https://github.com/CoNET-project/chat-sdk-android
-    // Version pinned in app/chat-sdk.lock (PM R2079); the local maven dir comes from -PchatSdkLocalRepo (settings.gradle.kts).
+    // Version pinned in app/chat-sdk.lock; the local maven dir comes from -PchatSdkLocalRepo (settings.gradle.kts).
     // The native-key line also needs -PchatSdkNativeKey=true.
     implementation("network.conet:chat:$chatSdkVersion")
     // Native route-key OpenPGP for call frames/control (off the WebView main thread).
@@ -575,7 +708,7 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 }
 
-// QA hooks must never reach a release or store artifact (PM R591): refuse the combination outright.
+// QA hooks must never reach a release or store artifact: refuse the combination outright.
 gradle.taskGraph.whenReady {
     if (chatQaHooks && allTasks.any { t -> t.project == project && Regex("(?i)(assemble|bundle|package)(release|store)").containsMatchIn(t.name) }) {
         throw GradleException("-PchatQaHooks is for debug QA builds only; release/store packaging refused.")

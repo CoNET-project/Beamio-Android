@@ -7,7 +7,7 @@ import java.io.IOException
 import java.io.InputStream
 
 /**
- * QA only (debug source set; release and store compile the no-op in src/qaGuardStub). PM R1574/R1595 isolated acceptance:
+ * QA only (debug source set; release and store compile the no-op in src/qaGuardStub). isolated acceptance:
  * when the app-private flag file `files/beamio-qa-fault-bundled-zip` exists (created only with `run-as` on a debuggable QA
  * build), reading the bundled SilentPassUI.zip throws, so the bootstrap's unreadable-zip paths can be checked on an emulator.
  * Nothing else changes; the flag is never created by the app.

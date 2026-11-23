@@ -6,7 +6,7 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * The native search-users lookup (caller tag by wallet address). Per the PM 2026-11-17 ruling (same as iOS 105):
+ * The native search-users lookup (caller tag by wallet address). Per review 2026-11-17 rule (same as iOS 105):
  * - the request goes to https://beamio.ca/api/search-users only (never beamio.app, which resolves to a parking host);
  * - automatic redirects are off; one redirect is followed only when it is an absolute https URL on exactly beamio.ca;
  *   any other redirect (foreign host, http, relative, missing Location) is refused and not requested;

@@ -158,7 +158,18 @@ object BeamioNativeChatHooks {
         Log.i(TAG, "chat status ${st?.optString("status")} ${st?.optString("detail").orEmpty()}")
     }
 
+    /**
+     * Peer end and timeout signals from the SDK callControlObserver carry no envelope, so the shell cannot
+     * verify them (v54 §61). Until the SDK delivers verified control signals, they are dropped (fail closed):
+     * a forged peer end must not hang up a call. Set to true only when the SDK verified-signal path is in place.
+     */
+    private const val PEER_CONTROL_VERIFIED_BY_SDK = false
+
     private fun onPeerCallControl(app: Context, type: String, callId: String, sessionId: String, from: String) {
+        if (!PEER_CONTROL_VERIFIED_BY_SDK) {
+            Log.i(TAG, "peer control dropped: unverified (fail closed) type=$type")
+            return
+        }
         Log.i(TAG, "chat end signal type=$type callId=${callId.take(12)}")
         // The recovered signer must be the caller when the offer is known;
         // otherwise the secret call ids are the only check.

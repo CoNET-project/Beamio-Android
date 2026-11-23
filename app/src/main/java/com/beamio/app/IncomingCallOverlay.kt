@@ -364,12 +364,9 @@ object IncomingCallOverlay {
         val view = windowView ?: return
         if (!attached) return
         val run = Runnable {
-            val nextTitle = title.trim().ifBlank {
+            // v116 §135: the title is the verified from short address for this call; the passed title is not used.
+            val nextTitle = IncomingCallTitle.forCall(callId, sessionId).ifBlank {
                 view.context.getString(R.string.incoming_call_body)
-            }
-            // Persist verified @BeamioTag across soft-reassert / sticky revive.
-            if (nextTitle.startsWith("@") && nextTitle.length in 2..33) {
-                claimedTag = nextTitle
             }
             view.findViewById<TextView>(R.id.incoming_call_title)?.text = nextTitle
             bindAvatar(view, nextTitle)

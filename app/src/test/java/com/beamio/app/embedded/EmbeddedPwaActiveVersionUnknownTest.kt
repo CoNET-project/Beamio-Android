@@ -17,7 +17,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 /**
- * PM review (ota-active-version-unknown-boundary-review-2026-11-17): an unreadable active version is unknown, never
+ * review (ota-active-version-unknown-boundary-review-2026-11-17): an unreadable active version is unknown, never
  * "0.0.0". Unknown never lets a remote bundle in: the OTA check is skipped, a staged bundle is not promoted, and the
  * bootstrap reinstalls the embedded ZIP so the active version is readable again.
  */

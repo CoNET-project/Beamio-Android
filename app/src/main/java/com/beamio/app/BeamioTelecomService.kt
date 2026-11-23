@@ -171,8 +171,9 @@ class BeamioTelecomService : ConnectionService() {
             audioModeIsVoip = true
             if (callId.isNotBlank()) activeConnections[callId] = this
             if (incoming) {
+                // v116 §135: the system name is the verified from short address (never the claimed name or tag).
                 setCallerDisplayName(
-                    displayName.ifBlank { peerAddress.ifBlank { "Beamio contact" } },
+                    IncomingCallTitle.forCall(callId, "").ifBlank { "Beamio contact" },
                     TelecomManager.PRESENTATION_ALLOWED,
                 )
             }
@@ -347,6 +348,8 @@ class BeamioTelecomService : ConnectionService() {
         const val EXTRA_SESSION_ID = "beamio.session_id"
         const val EXTRA_DISPLAY_NAME = "beamio.display_name"
         const val EXTRA_PEER_ADDRESS = "beamio.peer_address"
+        /** The shell-verified `from` carried to the window, so a rebuilt activity restores the same title source. */
+        const val EXTRA_VERIFIED_FROM = "beamio.verified_from"
         const val EXTRA_CLAIMED_TAG = "beamio.claimed_tag"
         const val EXTRA_CLAIMED_ADDRESS = "beamio.claimed_address"
         const val EXTRA_IDENTITY_WARNING = "beamio.identity_warning"
@@ -388,6 +391,8 @@ class BeamioTelecomService : ConnectionService() {
         // second self-managed call (which OEM Telecom rejects as a duplicate
         // ringing call).
         private val submittedIncomingCalls = ConcurrentHashMap.newKeySet<String>()
+        /** One registration per incoming call (callId and sessionId together). */
+        private val incomingPairs = IncomingPairRegistry()
         /** Ids that already own the glass window or the live call. Claimed before the Activity exists. */
         private val claimedChromeKeys = ConcurrentHashMap.newKeySet<String>()
         private val busyRejectKeys = ConcurrentHashMap.newKeySet<String>()
@@ -1174,6 +1179,7 @@ class BeamioTelecomService : ConnectionService() {
             claimedAddress: String = "",
             identityWarning: String = "",
         ) {
+            incomingPairs.record(callId, sessionId)
             val nativeCallId = sessionId.ifBlank { callId }
             restoreSettledIncoming(context)
             // A late report (PWA tag refresh, repeat delivery, push) for an offer
@@ -1613,6 +1619,28 @@ class BeamioTelecomService : ConnectionService() {
             cancelIncomingNotifications(context, endedId, sessionId)
         }
 
+        /**
+         * Native in-call hang-up button (v66 §73): end the local system call only (no voice_end_v1 from the
+         * shell), then tell the page through the chat-module event channel (nativeCallHangup). The PWA is the
+         * only sender of voice_end_v1. If no page is running, only the local end happens.
+         */
+        fun endNativeHangup(context: Context, callId: String, sessionId: String) {
+            val id = callId.ifBlank { sessionId }
+            Log.i(TAG, "endNativeHangup (no uplink; page event nativeCallHangup) idPresent=${id.isNotBlank()}")
+            completeIncomingUserAction(context, "callEnded", id, sessionId, fromTelecom = false, uplink = false)
+            MainActivity.emitNativeCallHangup(id, sessionId)
+        }
+
+        /**
+         * endSystemCall (page request): end the local system call only. No uplink, no dialer cancel:
+         * voice_end_v1 is sent by the PWA alone (v63 §70.2). Local cleanup is unchanged.
+         */
+        fun endLocalSystemCall(context: Context, callId: String, sessionId: String) {
+            val id = callId.ifBlank { sessionId }
+            Log.i(TAG, "endLocalSystemCall (no uplink) idPresent=${id.isNotBlank()}")
+            completeIncomingUserAction(context, "callEnded", id, sessionId, fromTelecom = false, uplink = false)
+        }
+
         fun end(context: Context, callId: String, sessionId: String = "") {
             val id = callId.ifBlank { sessionId }
             Log.i(
@@ -1622,6 +1650,39 @@ class BeamioTelecomService : ConnectionService() {
                     "endedIdPresent=${id.isNotBlank()} stickyChrome=${hasStickyVoiceChrome()}",
             )
             completeIncomingUserAction(context, "callEnded", id, sessionId, fromTelecom = false)
+        }
+
+        /**
+         * Local dismiss of an unanswered incoming call (v46 §52, PWA dismissIncomingSystemCall):
+         * stop the ring and vibration, hide the incoming window, the overlay banner and the
+         * Telecom card, and forget this call's registration. No uplink (no voice_end_v1, reject
+         * or ack), no sign, no answer. Session, UI-unlock, gen and dedupe records are untouched.
+         */
+        fun dismissIncomingLocal(context: Context, callId: String, sessionId: String): Boolean {
+            val c = callId.trim()
+            val s = sessionId.trim()
+            if (c.isEmpty() || s.isEmpty()) return false
+            // v48 §54.4: only the same registration (callId and sessionId together) is dismissed.
+            val matched = incomingPairs.matches(c, s)
+            if (!matched) {
+                Log.i(TAG, "dismissIncomingLocal no matching registration (no-op)")
+                return false
+            }
+            val ids = listOf(c, s)
+            cancelIncomingRingTimeout(callId, sessionId)
+            BeamioIncomingRingtone.stopFor(ids, "dismissLocal")
+            cancelOverlayFallbackBanner(context, ids)
+            ids.forEach {
+                shownCallers.remove(it)
+                submittedIncomingCalls.remove(it)
+            }
+            IncomingCallActivity.finishIfMatching(callId, sessionId)
+            IncomingCallOverlay.dismissIfShowing()
+            disconnectIncomingFor(ids, DisconnectCause.LOCAL)
+            incomingPairs.remove(c)
+            BeamioNativeVoiceSignaling.forgetOffer(c, s)
+            Log.i(TAG, "dismissIncomingLocal ids=${ids.size} (local only, no uplink)")
+            return true
         }
 
         /**
@@ -2102,6 +2163,7 @@ class BeamioTelecomService : ConnectionService() {
             callId: String,
             sessionId: String,
             fromTelecom: Boolean,
+            uplink: Boolean = true,
         ) {
             val endedId = callId.ifBlank { sessionId }
             if (endedId.isBlank()) return
@@ -2120,7 +2182,7 @@ class BeamioTelecomService : ConnectionService() {
             when (action) {
                 "callAnswered" -> BeamioNativeVoiceSignaling.sendAccept(context, callId, sessionId)
                 "callRejected" -> BeamioNativeVoiceSignaling.sendDecline(context, callId, sessionId)
-                "callEnded" -> {
+                "callEnded" -> if (uplink) {
                     // Our outgoing call still ringing: the prebuilt cancel goes out
                     // now, before the page hears callEnded (it then sends none).
                     BeamioNativeVoiceSignaling.postDialerCancelIfRinging(context, callId, sessionId)
@@ -2209,6 +2271,9 @@ class BeamioTelecomService : ConnectionService() {
             }
             shownCallers.remove(endedId)
             if (sessionId.isNotBlank()) shownCallers.remove(sessionId)
+            incomingPairs.remove(endedId)
+            incomingPairs.remove(callId)
+            BeamioNativeVoiceSignaling.unbindIncoming(callId.ifBlank { endedId })
             context.getSharedPreferences(CALLER_POOL_PREFS, Context.MODE_PRIVATE).edit()
                 .remove(endedId)
                 .remove(sessionId)
@@ -2513,6 +2578,7 @@ class BeamioTelecomService : ConnectionService() {
                     Intent.FLAG_ACTIVITY_NO_USER_ACTION
                 putExtra(EXTRA_CALL_ID, callId)
                 putExtra(EXTRA_SESSION_ID, sessionId)
+                putExtra(EXTRA_VERIFIED_FROM, VerifiedCallerRegistry.addressFor(callId, sessionId))
                 putExtra(EXTRA_INCOMING_TITLE, title)
                 putExtra(EXTRA_INCOMING_BODY, body)
                 putExtra(EXTRA_CLAIMED_TAG, claimedTag)
@@ -2531,6 +2597,7 @@ class BeamioTelecomService : ConnectionService() {
             aliasCallId: String = "",
         ) {
             if (callId.isBlank() && sessionId.isBlank() && aliasCallId.isBlank()) return
+            incomingPairs.record(callId, sessionId)
             if (isIncomingClosed(callId, sessionId, aliasCallId)) {
                 Log.i(TAG, "Skip incoming window; call already answered or ended")
                 if (!isIncomingAnsweredAny(callId, sessionId, aliasCallId)) {
@@ -3103,7 +3170,7 @@ class BeamioTelecomService : ConnectionService() {
         private fun fetchBeamioTag(address: String): String? {
             // search-users goes to beamio.ca only, with a single checked redirect (SearchUsersLookup); never a foreign host.
             return try {
-                // Incoming-call path is latency-sensitive: keep the original 4 s / 4 s timeouts (PM 2026-11-17).
+                // Incoming-call path is latency-sensitive: keep the original 4 s / 4 s timeouts (2026-11-17).
                 val body = com.beamio.app.search.SearchUsersLookup.fetchBody(address, connectTimeoutMs = 4000, readTimeoutMs = 4000)
                 if (body == null) {
                     Log.w(TAG, "Caller tag lookup unavailable")
@@ -3167,6 +3234,7 @@ class BeamioTelecomService : ConnectionService() {
         ) {
             if (callId.isBlank() && sessionId.isBlank()) return
             if (wasBusyRejected(callId, sessionId)) return
+            incomingPairs.record(callId.ifBlank { sessionId }, sessionId)
             reportIncoming(
                 context,
                 callId = callId.ifBlank { sessionId },
@@ -3341,14 +3409,16 @@ class BeamioTelecomService : ConnectionService() {
             onlyAlertOnce: Boolean,
         ): Notification {
             val text = body.ifBlank { context.getString(R.string.incoming_call_glass_subtitle) }
-            val avatar = callerAvatarBitmap(claimedTag.ifBlank { title })
+            // v116 §135: title and avatar come only from the verified address; the claimed tag is sub text, labelled.
+            val shownTitle = IncomingCallTitle.forCall(callId, sessionId).ifBlank { context.getString(R.string.incoming_call_body) }
+            val avatar = VerifiedCallerRegistry.addressFor(callId, sessionId).takeIf { it.isNotBlank() }?.let { callerAvatarBitmap(it) }
             val personIcon = if (avatar != null) {
                 IconCompat.createWithBitmap(avatar)
             } else {
                 IconCompat.createWithResource(context, R.drawable.ic_incoming_call_status)
             }
             val person = Person.Builder()
-                .setName(title)
+                .setName(shownTitle)
                 .setIcon(personIcon)
                 .setImportant(true)
                 .build()
@@ -3356,7 +3426,7 @@ class BeamioTelecomService : ConnectionService() {
                 context,
                 callId = callId,
                 sessionId = sessionId,
-                title = title,
+                title = shownTitle,
                 body = text,
                 claimedTag = claimedTag.ifBlank { title.takeIf(::isBeamioTag).orEmpty() },
             )
@@ -3373,8 +3443,9 @@ class BeamioTelecomService : ConnectionService() {
             )
             val builder = NotificationCompat.Builder(context, INCOMING_CALL_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_incoming_call_status)
-                .setContentTitle(title)
+                .setContentTitle(shownTitle)
                 .setContentText(text)
+                .apply { IncomingCallTitle.secondary(claimedTag)?.let { setSubText(it) } }
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -3528,7 +3599,7 @@ class BeamioTelecomService : ConnectionService() {
             val postedId = notificationId(primary)
             if (postedId == 0 || name.isBlank()) return
             val title = name.trim()
-            val avatar = callerAvatarBitmap(claimedTag.ifBlank { title })
+            val avatar = VerifiedCallerRegistry.addressFor(callId, sessionId).takeIf { it.isNotBlank() }?.let { callerAvatarBitmap(it) }
             val notification = buildIncomingCallStyle(
                 context, postedId, callId, sessionId, title, body, claimedTag, onlyAlertOnce = true,
             )

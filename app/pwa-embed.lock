@@ -1,7 +1,11 @@
-# Written by scripts/syncEmbeddedPwaZipToNativeShells.sh at 2026-11-17T20:42:38Z. Do not edit by hand.
-zip_sha256=60746b1edbcf9ea680085ffd1ca67e7e484e4febae57f8ad1a61b77b2b39694e
-zip_ver=0.52.935
-classification=approved
-approved_ver=0.52.935
-approved_sha256=60746b1edbcf9ea680085ffd1ca67e7e484e4febae57f8ad1a61b77b2b39694e
-approval_record=project-owner approval 2026-11-17, PM record sha256:3704a8bc735ba74f3129c9da68c1905d530f22358ae204e7a74c48ef04919869
+# Written by scripts/syncEmbeddedPwaZipToNativeShells.sh at 2026-11-23T12:04:03Z. Do not edit by hand.
+zip_sha256=427b9b0928a0f515924e413922df3b9953228d31780fb786aeb88d5a07771998
+zip_ver=0.53.45
+classification=delegated-freeze
+freeze_manifest=pwa-freeze-manifest.json
+freeze_manifest_sha256=02b5ee5695774555aad1cfa18676ecf87f16af00bc7bc219f1ea7c6d43b8e6ab
+freeze_ver=0.53.45
+freeze_zip_sha256=427b9b0928a0f515924e413922df3b9953228d31780fb786aeb88d5a07771998
+delegated_pass_json_sha256=df2874264b645bdc19a196f1cfa76e76c4c0e10b22e1b5773810df5035cabbaf
+delegated_approval_txt_sha256=54391e55f0be2400ebdd2f0554d3283a9a4a534e62b8c282c9717325f77a52d3
+delegated_checker_sha256=26a43f7f19c3557bb673215815ffdf2a905aed70db2a2c560b4fe5e8c555b270

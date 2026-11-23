@@ -8,7 +8,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * Release build shape (PM R675/R677/R679/R680; spec r3cx §25.52AZ.4, r3de §25.52BF.2, r3dg §25.52BI.1). Runs only in
+ * Release build shape (spec r3cx §25.52AZ.4, r3de §25.52BF.2, r3dg §25.52BI.1). Runs only in
  * `testReleaseUnitTest`, against the release variant's classes before R8.
  */
 class ReleaseBuildShapeTest {
@@ -27,7 +27,7 @@ class ReleaseBuildShapeTest {
         assertFalse(BuildConfig.QA_WRITE_GUARD)
     }
 
-    /** PM R826 (d), spec §25.52DR.3: release and store build without the legacy sensitive bridge by default. */
+    /** (d), spec §25.52DR.3: release and store build without the legacy sensitive bridge by default. */
     @Test
     fun legacySensitiveBridgeIsOffAndTheBaseBridgeHasOnly13Methods() {
         assertFalse("release/store must not re-expose sensitive methods on CashTreesAndroid", BuildConfig.LEGACY_SENSITIVE_BRIDGE)
@@ -45,7 +45,7 @@ class ReleaseBuildShapeTest {
         )
     }
 
-    /** PM R900: the bundle-store test hook is not in the release classes (it lives in the test source set). */
+    /**: the bundle-store test hook is not in the release classes (it lives in the test source set). */
     @Test
     fun bundleStoreHasNoTestHook() {
         val c = com.beamio.app.embedded.EmbeddedPwaBundleStore::class.java

@@ -107,7 +107,7 @@ public class Ah6BridgeInstrumentation extends Instrumentation {
                 Log.i(TAG, "send type=" + NAMES[k] + " reqId=" + reqId + " via window.CashTreesAndroid.chatModuleCommand");
                 eval(a, "window.__ah6chat(JSON.stringify({type:'" + NAMES[k] + "',reqId:" + reqId + "}))");
             }
-            // 1b) shellRecord* on the chat-module channel: not_supported, exactly once (r3cx §25.52AZ.1; PM R712).
+            // 1b) shellRecord* on the chat-module channel: not_supported, exactly once (r3cx §25.52AZ.1).
             for (int k = 0; k < SR_CHAT.length; k++) {
                 eval(a, "window.__ah6chat(JSON.stringify({type:'" + SR_CHAT[k] + "',reqId:" + (BASE + 20 + k) + "}))");
             }
@@ -191,7 +191,7 @@ public class Ah6BridgeInstrumentation extends Instrumentation {
                 Log.i(TAG, "window checks unknownShellRecord=" + uOk + " badJson=" + bOk + " unknownTop=" + tOk);
                 if (!uOk || !bOk || !tOk) pass = false;
             }
-            // 4b) window.BeamioChat (PM R763 scheme 1): hello -> ack ok:true with the same reqId; unparsable JSON -> bad_request.
+            // 4b) window.BeamioChat (scheme 1): hello -> ack ok:true with the same reqId; unparsable JSON -> bad_request.
             String bcReady = eval(a, "(typeof window.BeamioChat==='object'||typeof window.BeamioChat==='function')");
             Log.i(TAG, "BeamioChat present=" + bcReady);
             boolean bcOk = false;
@@ -224,7 +224,7 @@ public class Ah6BridgeInstrumentation extends Instrumentation {
                 Log.i(TAG, "BeamioChat check hello=" + helloOk + " helloCount=" + helloCount + " badJson=" + badOk2);
             }
             if (!bcOk) pass = false;
-            // 4c) window.BeamioShell (PM R789): main frame accepted; gate and URL check answer on the channel; an appassets
+            // 4c) window.BeamioShell: main frame accepted; gate and URL check answer on the channel; an appassets
             //     iframe is refused with origin_refused; sensitive methods on CashTreesAndroid only in a legacy build.
             String shReady = eval(a, "(typeof window.BeamioShell==='object'||typeof window.BeamioShell==='function')");
             Log.i(TAG, "BeamioShell present=" + shReady);
@@ -236,7 +236,7 @@ public class Ah6BridgeInstrumentation extends Instrumentation {
                         + "P({action:'bindPushIdentity',reqId:" + (BASE + 91) + ",args:{}});"
                         + "P({action:'openURL',reqId:" + (BASE + 92) + ",args:{url:'https://x.example/p?privateKey=1'}});"
                         + "P({action:'chatModuleCommand',reqId:" + (BASE + 93) + "});"
-                        // PM R820: scanRecoveryQr removed -> unknown_command; notifyVoiceMicReady moved here -> gated (no_key in G0)
+                        // scanRecoveryQr removed -> unknown_command; notifyVoiceMicReady moved here -> gated (no_key in G0)
                         + "P({action:'scanRecoveryQr',reqId:" + (BASE + 95) + ",args:{requestId:'x'}});"
                         + "P({action:'notifyVoiceMicReady',reqId:" + (BASE + 96) + ",args:{}});"
                         // srcdoc: a same-origin (appassets) child frame, so the channel object is injected but isMainFrame is false.
@@ -266,11 +266,11 @@ public class Ah6BridgeInstrumentation extends Instrumentation {
                 boolean once = sh.length() == 6;
                 for (long id : new long[]{BASE + 90, BASE + 91, BASE + 92, BASE + 93, BASE + 95, BASE + 96}) once = once && Integer.valueOf(1).equals(count.get(id));
                 JSONObject rq = by.get((long) (BASE + 95)), vm = by.get((long) (BASE + 96));
-                boolean r820 = rq != null && "unknown_command".equals(rq.optString("error"))
+                boolean movedCmdsOk = rq != null && "unknown_command".equals(rq.optString("error"))
                         && vm != null && !vm.optBoolean("ok", true) && "no_key".equals(vm.optString("error"));
                 String oldRecovery = eval(a, "(window.CashTreesAndroid?typeof window.CashTreesAndroid.scanRecoveryQr:'nobridge')").replace("\"", "");
-                r820 = r820 && "undefined".equals(oldRecovery);
-                Log.i(TAG, "BeamioShell R820 scanRecoveryQr/notifyVoiceMicReady=" + r820 + " CashTreesAndroid.scanRecoveryQr=" + oldRecovery);
+                movedCmdsOk = movedCmdsOk && "undefined".equals(oldRecovery);
+                Log.i(TAG, "BeamioShell scanRecoveryQr/notifyVoiceMicReady=" + movedCmdsOk + " CashTreesAndroid.scanRecoveryQr=" + oldRecovery);
                 JSONObject q = by.get((long) (BASE + 90)), g = by.get((long) (BASE + 91)), u = by.get((long) (BASE + 92)), c = by.get((long) (BASE + 93));
                 boolean qOk = q != null && q.optBoolean("ok") && q.optJSONArray("result") != null && "queryInstalledApps".equals(q.optString("action"));
                 boolean gOk = g != null && !g.optBoolean("ok", true) && "no_key".equals(g.optString("error"));
@@ -306,10 +306,10 @@ public class Ah6BridgeInstrumentation extends Instrumentation {
                 legOk = legOk && migOk == migrated.length && keptOk == kept.length;
                 Log.i(TAG, "BeamioShell check once=" + once + " query=" + qOk + " gate=" + gOk + " url=" + uOk + " unknown=" + cOk
                         + " iframe=" + ifOk + " legacy=" + legOk);
-                shOk = once && qOk && gOk && uOk && cOk && ifOk && legOk && r820;
+                shOk = once && qOk && gOk && uOk && cOk && ifOk && legOk && movedCmdsOk;
             }
             if (!shOk) pass = false;
-            // 5) Origin gate (PM R756 scheme 2): once the top-level page is not the trusted origin, chatModuleCommand is
+            // 5) Origin gate (scheme 2): once the top-level page is not the trusted origin, chatModuleCommand is
             //    refused by the shell with origin_refused, exactly once, reqId echoed.
             eval(a, "location.replace('about:blank');'nav'");
             Thread.sleep(2500);

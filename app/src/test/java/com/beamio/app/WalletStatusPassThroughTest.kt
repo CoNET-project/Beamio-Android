@@ -7,13 +7,25 @@ import org.junit.Test
 import java.io.File
 
 /**
- * Spec §25.52Y.39 items 9-10 (PM R1844): walletStatus answers carry `notReadyReason` (g1_uninitialized | unreadable).
+ * Spec §25.52Y.39 items 9-10: walletStatus answers carry `notReadyReason` (g1_uninitialized | unreadable).
  * The shell must pass SDK module events to the page unchanged: no field allowlist, no result rewriting.
  */
 class WalletStatusPassThroughTest {
     private val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
     private val handler = main.substringAfter("private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {")
         .substringBefore("\n    private var qaEvalReceiver")
+        // handlePageSyncCommand (placed between handleChatCommand and sdkDeliver) is the page-sync request path: it strips
+        // the request's trustedOrigin and reads a passcodeUnlock ack only to start the incoming-call authorize (v114 §133.5). It is
+        // checked on its own in pageSyncPathDoesNotRewriteTheReply; the chat reply path below is scanned without it.
+        .let { h -> h.substringBefore("\n    private fun handlePageSyncCommand(") + "\n" + pageSyncBlockEnd(h) }
+
+    private fun pageSyncBlock(h: String): String =
+        h.substringAfter("\n    private fun handlePageSyncCommand(", "").substringBefore("\n    }\n")
+
+    private fun pageSyncBlockEnd(h: String): String {
+        val tail = h.substringAfter("\n    private fun handlePageSyncCommand(", "")
+        return if (tail.isEmpty()) "" else tail.substringAfter("\n    }\n")
+    }
 
     @Test
     fun moduleEventsReachThePageUnchanged() {
@@ -40,7 +52,7 @@ class WalletStatusPassThroughTest {
         assertTrue(handler.contains("QaBridgeLogFields.value(it, r.opt(it))"))
     }
 
-    /** Review of e32ca58c: only the two defined values are printed; anything else becomes <unknown> (runtime check). */
+    /** Only the two defined values are printed; anything else becomes <unknown> (runtime check). */
     @Test
     fun notReadyReasonValueIsLimitedToItsTwoDefinedValues() {
         assertEquals("g1_uninitialized", QaBridgeLogFields.value("notReadyReason", "g1_uninitialized"))
@@ -49,5 +61,15 @@ class WalletStatusPassThroughTest {
             assertEquals("bad value $bad", "<unknown>", QaBridgeLogFields.value("notReadyReason", bad))
         }
         assertEquals("not_ready", QaBridgeLogFields.value("status", "not_ready"))
+    }
+
+    /** The page-sync path never rewrites the SDK's reply: it may read an unlock ack, but builds no new result. */
+    @Test
+    fun pageSyncPathDoesNotRewriteTheReply() {
+        val full = main.substringAfter("private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {")
+            .substringBefore("\n    private var qaEvalReceiver")
+        val page = pageSyncBlock(full)
+        assertTrue(page.contains("body.remove(\"trustedOrigin\")"))
+        for (rewrite in listOf("result\", JSONObject()", "put(\"result\"", "notReadyReason\")")) assertFalse("page-sync rewrites: $rewrite", page.contains(rewrite))
     }
 }

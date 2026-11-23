@@ -67,20 +67,14 @@ class CashTreesFirebaseMessagingService : FirebaseMessagingService() {
                 return
             }
             if (BeamioTelecomService.wasBusyRejected(callId, sessionId)) return
-            // Claim or busy-reject before any encryption WebView. A second call
-            // must not open OpenPgp while the first glass window is up.
-            BeamioTelecomService.showIncomingCallWakeNotification(
-                applicationContext,
-                callId,
-                sessionId,
-            )
-            if (BeamioTelecomService.wasBusyRejected(callId, sessionId)) return
             // Open the chat mailbox listen now (stored keys, no page needed): the
             // caller's cancel and other senders' messages arrive while it rings.
+            // No UI and no ring here: the ring waits for the offer signature check (chat interface spec 29 v6 §八, §五).
             BeamioNativeChatHooks.wakeForCallPush(applicationContext)
             // Prefetch the offer (caller keys) BEFORE CallStyle so Decline can
             // AES-encrypt voice_call_reject_v1 (same race as iOS PushKit).
             // FCM stays opaque (no caller identity in push); resolve upgrades title.
+            // Without a callId nothing can be verified: no ring (fail closed).
             if (callId.isNotBlank()) {
                 BeamioVoiceOfferIdentity.scheduleResolveDelayed(
                     applicationContext,
@@ -88,6 +82,15 @@ class CashTreesFirebaseMessagingService : FirebaseMessagingService() {
                     sessionId,
                     delayMs = 0L,
                 ) { identity ->
+                    // Runs only after the offer verified (answerable). Claim or busy-reject
+                    // here, then ring. A busy or waiting second call never reaches the ring.
+                    if (BeamioTelecomService.wasBusyRejected(callId, sessionId)) return@scheduleResolveDelayed
+                    BeamioTelecomService.showIncomingCallWakeNotification(
+                        applicationContext,
+                        callId,
+                        sessionId,
+                    )
+                    if (BeamioTelecomService.wasBusyRejected(callId, sessionId)) return@scheduleResolveDelayed
                     // Upgrade the same small incoming window to @BeamioTag.
                     val tag = identity.beamioTag.orEmpty()
                     val display = tag.ifBlank { identity.shortAddress }

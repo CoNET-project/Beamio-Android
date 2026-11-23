@@ -7,7 +7,7 @@ import org.junit.Test
 import java.io.File
 
 /**
- * PM R697/R709, spec r3dk §25.52BM.1 and CRED: no shell answer carries a recovery code, and scanRecoveryQr refuses
+ *spec r3dk §25.52BM.1 and CRED: no shell answer carries a recovery code, and scanRecoveryQr refuses
  * before any scan. listInstalledWalletApps is an alias of queryInstalledApps (§25.52BD.1).
  */
 class RecoveryCodeNotOnBridgeTest {
@@ -25,7 +25,7 @@ class RecoveryCodeNotOnBridgeTest {
 
     @Test
     fun scanRecoveryQrIsGone() {
-        // PM R820: removed from the shell entirely (no bridge entry, no BeamioShell action, no scanner path).
+        // removed from the shell entirely (no bridge entry, no BeamioShell action, no scanner path).
         val src = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertFalse(Regex("fun scanRecoveryQr\\(").containsMatchIn(src))
         assertFalse(src.contains("bridgeAction = \"scanRecoveryQr\""))

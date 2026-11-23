@@ -73,7 +73,7 @@ class QaWriteGuardTest {
         assertEquals(3, Regex("buildConfigField\\(\"boolean\", \"QA_WRITE_GUARD\"").findAll(gradle).count())
         assertTrue(gradle.contains("buildConfigField(\"boolean\", \"QA_WRITE_GUARD\", qaWriteGuard.toString())"))
         assertEquals(2, Regex("buildConfigField\\(\"boolean\", \"QA_WRITE_GUARD\", \"false\"\\)").findAll(gradle).count())
-        // PM R675: the real guard is debug-only; release and store compile a no-op stub that is never active.
+        // the real guard is debug-only; release and store compile a no-op stub that is never active.
         val guard = File("src/debug/java/com/beamio/app/qa/QaWriteGuard.kt").readText()
         assertTrue(guard.contains("BuildConfig.DEBUG && BuildConfig.QA_WRITE_GUARD"))
         val stub = File("src/qaGuardStub/java/com/beamio/app/qa/QaWriteGuard.kt").readText()
@@ -82,7 +82,7 @@ class QaWriteGuardTest {
         assertTrue(gradle.contains("getByName(\"release\").let { it.java.directories.add(\"src/qaGuardStub/java\")"))
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         for (src in listOf("page", "remote", "browser")) assertTrue(src, main.contains("QaWriteGuard.intercept(request, \"$src\")"))
-        // The service worker backstop moved into the debug guard's installNativeHooks (PM R675).
+        // The service worker backstop moved into the debug guard's installNativeHooks .
         assertTrue("sw", guard.contains("intercept(request, \"sw\")"))
         assertTrue(main.contains("QaWriteGuard.installNativeHooks(this)") && main.contains("QaWriteGuard.installWebViewHooks(this)"))
         val voice = File("src/main/java/com/beamio/app/BeamioNativeVoiceChannel.kt").readText()
@@ -103,9 +103,9 @@ class QaWriteGuardTest {
         assertEquals(2, Regex("QaWriteGuard\\.decorateScript\\(").findAll(main).count())
     }
 
-    /** R336 section 2.2: exactly these eleven read methods; section 1: host allowlist. */
+    /** Section 2.2: exactly these eleven read methods; section 1: host allowlist. */
     @Test
-    fun r336MethodAndHostLists() {
+    fun methodAndHostLists() {
         assertEquals(
             listOf("eth_call", "eth_getCode", "eth_getBalance", "eth_chainId", "eth_blockNumber", "eth_getTransactionReceipt",
                 "eth_getTransactionByHash", "eth_getLogs", "eth_estimateGas", "eth_gasPrice", "net_version"),
@@ -115,7 +115,7 @@ class QaWriteGuardTest {
         assertFalse("beamio.ca is not an RPC host", "beamio.ca" in QaWriteGuard.RPC_HOSTS)
         // GET only to listed hosts
         assertTrue(QaWriteGuard.nativeAllows("GET", "https", "beamio.ca", "https://beamio.ca/api/cardMetadata"))
-        // PM R1637: the shell no longer reads from the old domain.
+        // the shell no longer reads from the old domain.
         assertFalse(QaWriteGuard.nativeAllows("GET", "https", "beamio.app", "https://beamio.app/api/cardMetadata"))
         assertTrue(QaWriteGuard.nativeAllows("GET", "https", "ipfs.conet.network", "https://ipfs.conet.network/x"))
         assertFalse(QaWriteGuard.nativeAllows("GET", "https", "hooks.conet.network", "https://hooks.conet.network/x"))

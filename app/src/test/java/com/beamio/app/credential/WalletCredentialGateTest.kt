@@ -73,7 +73,7 @@ class WalletCredentialGateTest {
 
     /**
      * The capability bits come only from the lock-bound manifest of this build (0.53.1 QA manifest: wallet.credential.v1),
-     * bound to the embedded zip; the store build type never gets QA-manifest bits (PM R2042).
+ * bound to the embedded zip; the store build type never gets QA-manifest bits .
      */
     @Test
     fun buildCapabilitiesAreBoundToTheEmbeddedZipAndNeverInStore() {
@@ -139,7 +139,7 @@ class WalletCredentialGateTest {
         assertTrue(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words))))
         assertTrue(WalletCredentialGate.responseAllowed(ack(JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words).put("blob", "c2VhbGVk"))))
         assertTrue(WalletCredentialGate.responseAllowed(ack(null)))
-        // 930988d does not know the command yet: unknown_command passes as a plain failure.
+        // The SDK of that time does not know the command yet: unknown_command passes as a plain failure.
         assertTrue(WalletCredentialGate.responseAllowed(JSONObject().put("type", "ack").put("reqId", 7).put("ok", false).put("error", "unknown_command")))
     }
 
@@ -160,7 +160,7 @@ class WalletCredentialGateTest {
         assertFalse(r.logLine!!.contains(words) || r.logLine!!.contains(testKey))
     }
 
-    /** W-L5 shell side (PM R1904; r3oh §25.52Y.38 item 8 (8e)): eoa_key or eoaPrivateKey -> unavailable, nothing else. */
+    /** W-L5 shell side (r3oh §25.52Y.38 item 8 (8e)): eoa_key or eoaPrivateKey -> unavailable, nothing else. */
     @Test
     fun wL5_eoaKeyReplyBecomesUnavailable() {
         val cases = listOf(
@@ -196,7 +196,7 @@ class WalletCredentialGateTest {
             JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words.uppercase()),
             JSONObject().put("eoa", testEoa).put("credentialKind", "mnemonic").put("mnemonic", words).put("pgpPrivateKeyArmored", "x"),
             JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey.drop(2)),
-            // PM R1884 / §25.52Y.42 item 5 (b): an eoa_key account answers unavailable; a key reply never passes
+            // / §25.52Y.42 item 5 (b): an eoa_key account answers unavailable; a key reply never passes
             JSONObject().put("eoa", testEoa).put("credentialKind", "eoa_key").put("eoaPrivateKey", testKey),
             JSONObject().put("credentialKind", "mnemonic").put("mnemonic", words),
         )
@@ -205,7 +205,7 @@ class WalletCredentialGateTest {
         assertFalse(WalletCredentialGate.responseAllowed(JSONObject().put("type", "ack").put("reqId", 7).put("ok", false).put("error", "x").put("mnemonic", words)))
     }
 
-    // ---- walletEoaAddress (§25.52Y.42 item 5 (c)(d); PM R1896 (3)) ----
+    // ---- walletEoaAddress (§25.52Y.42 item 5 (c)(d); (3)) ----
 
     private fun addrReq(vararg kv: Pair<String, Any>) = JSONObject().put("type", "walletEoaAddress").put("reqId", 8).apply { kv.forEach { put(it.first, it.second) } }
 
@@ -247,7 +247,7 @@ class WalletCredentialGateTest {
         assertFalse("address not logged", ok.logLine!!.contains(testEoa))
     }
 
-    // ---- window channel (PM R1911; SDK answers walletEoaAddress on BeamioShellRecord) ----
+    // ---- window channel (SDK answers walletEoaAddress on BeamioShellRecord) ----
 
     @Test
     fun windowChannelGatesWalletEoaAddressBeforeAndAfterTheSdk() {
@@ -279,7 +279,7 @@ class WalletCredentialGateTest {
         // trusted: the SDK's {eoa} passes unchanged
         val ok = run(addrReq(), Verdict.TRUSTED, okReply)
         assertEquals(testEoa, ok.getJSONObject("result").getString("eoa")); assertEquals(1, calls)
-        // SDK failures pass as failures (1b33f00 today answers unknown_command on this channel)
+        // SDK failures pass as failures (the SDK currently answers unknown_command on this channel)
         assertEquals("unknown_command", run(addrReq(), Verdict.TRUSTED, JSONObject().put("reqId", 8).put("ok", false).put("error", "unknown_command").toString()).getString("error"))
         assertEquals("no_key", run(addrReq(), Verdict.TRUSTED, JSONObject().put("type", "ack").put("reqId", 8).put("ok", false).put("error", "no_key").toString()).getString("error"))
         // a reply with more than the address, another reqId, or not JSON never reaches the page
@@ -294,7 +294,7 @@ class WalletCredentialGateTest {
         assertTrue(r.logs.any { it.startsWith("error cmd=walletEoaAddress") }); assertFalse(r.logs.any { it.contains(testEoa) })
     }
 
-    /** r3ok / PM R1912: walletEoaAddress needs no capability bit (origin, frame, bundle); walletCredential does. */
+    /** r3ok /: walletEoaAddress needs no capability bit (origin, frame, bundle); walletCredential does. */
     @Test
     fun capabilityRequirementPerCommand() {
         assertFalse(WalletCredentialGate.requiresCapability("walletEoaAddress"))
@@ -363,7 +363,7 @@ class WalletCredentialGateTest {
     private val wRecord = JSONObject().put("mnemonicPhrase", words).put("recoveryWords", "w1 w2").put("profiles", JSONArray().put(JSONObject().put("keyID", testEoa).put("privateKeyArmor", "armor")))
 
     /**
-     * (a) as ruled for this round (r3nt §25.52Y.43 item 6 (i), PM R1863): read-back checks no capability bit, but an old or
+ * (a) as decided for this round (r3nt §25.52Y.43 item 6 (i)): read-back checks no capability bit, but an old or
      * unverified package (bundle not the verified bytes of the hash this APK loads) is not_trusted, with no partial fields.
      */
     @Test
@@ -378,14 +378,14 @@ class WalletCredentialGateTest {
         val out = WalletCredentialGate.gateShellRecordRead(readReq, readReply(wRecord.put("nickname", "n"))) { v }
         assertEquals(Verdict.BUNDLE_NOT_VERIFIED, out.verdict)
         val o = JSONObject(out.reply)
-        // r3ow (PM R1970/R1974): for shellRecordRead a bundle failure also answers origin_refused, envelope-level; no record
+        // r3ow: for shellRecordRead a bundle failure also answers origin_refused, envelope-level; no record
         assertEquals("origin_refused", o.getString("error")); assertEquals(false, o.getBoolean("ok")); assertEquals(11, o.getInt("reqId"))
         assertEquals(setOf("type", "reqId", "ok", "error"), o.keys().asSequence().toSet())
         assertEquals(listOf("mnemonicPhrase", "privateKeyArmor", "recoveryWords"), out.wFields)
     }
 
     /**
-     * r3ow §25.52Y.41 item 6 (PM R1974): shellRecordRead answers origin_refused for a bundle failure as well as for a source
+ * r3ow §25.52Y.41 item 6: shellRecordRead answers origin_refused for a bundle failure as well as for a source
      * mismatch (the PWA does not handle not_trusted yet); not_trusted stays for the two new commands only.
      */
     @Test
@@ -402,7 +402,7 @@ class WalletCredentialGateTest {
         }
     }
 
-    /** Reviewer (R1969): an exception in the read-back gate answers the r3oo storage-error shape, not origin_refused. */
+    /** An exception in the read-back gate answers the r3oo storage-error shape, not origin_refused. */
     @Test
     fun y41_gateExceptionAnswersRecordUnreadable() {
         val o = JSONObject(WalletCredentialGate.shellRecordUnreadable(11))
@@ -414,7 +414,7 @@ class WalletCredentialGateTest {
         assertTrue(catchBlock.contains("shellRecordUnreadable(")); assertFalse(catchBlock.contains("shellRecordRefusal("))
     }
 
-    /** Reviewer (R1969) on 039e736c: source/frame is checked before parsing; an iframe's unparsable text is origin_refused. */
+    /** Source/frame is checked before parsing; an iframe's unparsable text is origin_refused. */
     @Test
     fun windowSourceCheckRunsBeforeParsing() {
         for ((data, frame, origin) in listOf(
@@ -432,7 +432,7 @@ class WalletCredentialGateTest {
         val src = File("src/main/java/com/beamio/app/legacy/ShellRecordChannel.kt").readText()
         val first = src.indexOf("WalletCredentialGate.windowSourceRefusal(message.data, isMainFrame, sourceOrigin.toString())")
         assertTrue(first > 0)
-        assertTrue(first < src.indexOf("val data = message.data ?: run { reply.postMessage(BAD_REQUEST)"))
+        assertTrue(first < src.indexOf("val data = PageSyncRoute.stripPageTrustedOriginText(message.data ?: run { reply.postMessage(BAD_REQUEST)"))
         assertTrue(first < src.indexOf("var out = if (!parsed) BAD_REQUEST"))
     }
 

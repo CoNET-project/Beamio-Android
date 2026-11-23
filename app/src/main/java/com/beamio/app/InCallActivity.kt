@@ -274,7 +274,7 @@ class InCallActivity : ComponentActivity() {
             }
             // startSystemCall may have filled in the ids before this screen re-rendered.
             val snapshot = InCallScreenModel.snapshot()
-            BeamioTelecomService.end(
+            BeamioTelecomService.endNativeHangup(
                 this,
                 callId.ifBlank { snapshot.callId },
                 sessionId.ifBlank { snapshot.sessionId },

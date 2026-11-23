@@ -6,7 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** PM 2026-11-17: the SDK's default API base (beamio.app) must never reach a request; the shell pins it on init. */
+/** 2026-11-17: the SDK's default API base (beamio.app) must never reach a request; the shell pins it on init. */
 class ChatApiBaseTest {
     @Test
     fun initWithoutBaseGetsThePinnedBase() {
