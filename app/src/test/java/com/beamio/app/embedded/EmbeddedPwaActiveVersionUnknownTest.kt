@@ -40,10 +40,12 @@ class EmbeddedPwaActiveVersionUnknownTest {
         root = tmp.newFolder("silentpass_pwa")
     }
 
+    /** Pinned like every production build (the embedded ZIP's SHA-256 from the lock), so it is a verified candidate. */
     private fun newStore() = EmbeddedPwaBundleStore(
         rootDir = root,
         openBundledZip = { ByteArrayInputStream(checkNotNull(bundledZip) { "no bundled zip" }) },
         activatedAssetHash = hashStore,
+        expectedZipSha256 = bundledZip?.let { b -> MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) } },
     )
 
     /** Active bundle with a complete index and script. [version] null: update.json absent; [corrupt]: truncated JSON. */
@@ -72,7 +74,7 @@ class EmbeddedPwaActiveVersionUnknownTest {
                 zip.closeEntry()
             }
         }
-        return out.toByteArray()
+        return OtaTestSigner.canonicalize(out.toByteArray())
     }
 
     private fun indexHtml() =
@@ -157,7 +159,7 @@ class EmbeddedPwaActiveVersionUnknownTest {
 
         val error = assertThrows(IllegalStateException::class.java) { store.promoteStagingToActive() }
 
-        assertEquals("staged_not_newer", error.message)
+        assertEquals("staged_not_verified", error.message) // unsigned staging is refused before any version check
         assertEquals("0.52.935", store.activeVersion())
         assertFalse(store.stagingDir.exists())
     }
@@ -166,9 +168,11 @@ class EmbeddedPwaActiveVersionUnknownTest {
 
     @Test
     fun stagedNewer936IsPromotedOverActive935() {
+        // the staged bundle must carry a verified-download record (installDownloadToStaging).
         writeBundle(File(root, "active"), "0.52.935")
-        val store = newStore()
-        writeStaged(store, "0.52.936")
+        val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(checkNotNull(bundledZip)) }, hashStore, embeddedZipVer = "0.52.935", otaKeys = OtaTestSigner.keys)
+        val zip = File(root.parentFile, "ota-936.zip").apply { writeBytes(zipOf("0.52.936")) }
+        OtaTestSigner.stage(store, zip, "0.52.936")
 
         store.promoteStagingToActive()
 
@@ -187,7 +191,7 @@ class EmbeddedPwaActiveVersionUnknownTest {
 
         val error = assertThrows(IllegalStateException::class.java) { store.promoteStagingToActive() }
 
-        assertEquals("active_version_unknown", error.message)
+        assertEquals("staged_not_verified", error.message) // unsigned staging is refused before any version check
         assertFalse(store.stagingDir.exists())
         assertNull(store.pendingUpdateVersion())
         assertEquals(before, File(root, "active/update.json").readText())

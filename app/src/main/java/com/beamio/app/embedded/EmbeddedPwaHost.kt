@@ -16,7 +16,16 @@ import com.beamio.app.BuildConfig
 class EmbeddedPwaHost(context: Context) {
     private val appContext = context.applicationContext
     val remotePwaUpdate: Boolean = BuildConfig.REMOTE_PWA_UPDATE
-    val bundleStore = EmbeddedPwaBundleStore(appContext, remotePwaUpdate, BuildConfig.PWA_ZIP_SHA256)
+    val bundleStore = EmbeddedPwaBundleStore(
+        appContext,
+        remotePwaUpdate,
+        BuildConfig.PWA_ZIP_SHA256,
+        BuildConfig.PWA_CONTENT_SHA256,
+        BuildConfig.PWA_ZIP_VER,
+        BuildConfig.VERSION_CODE.toLong(),
+        installIdentity(appContext),
+        EmbeddedPwaOtaKeys.table(BuildConfig.OTA_QA_PUBLIC_KEY),
+    )
 
     /**
  * Capability bit for the page (store-build OTA shell/PWA protocol, since 2026-11-12):
@@ -39,6 +48,12 @@ class EmbeddedPwaHost(context: Context) {
     fun bootstrapIfNeeded() {
         bundleStore.bootstrapIfNeeded()
         buildAssetLoaderIfNeeded()
+        if (bundleStore.lastPath == "fast") {
+            // the fast path opened active/ on its fingerprint only; bridge trust still needs one
+            // full content digest per process. Start it now in the background; until it completes, trust checks compute it
+            // themselves (off the main thread) and never grant on the fingerprint.
+            Thread({ EmbeddedPwaBundleStore.currentVerifiedActiveZipSha256() }, "pwa-trust-warmup").apply { isDaemon = true }.start()
+        }
     }
 
     fun buildAssetLoaderIfNeeded() {
@@ -147,4 +162,12 @@ class EmbeddedPwaHost(context: Context) {
 
     private fun escapeJs(raw: String): String =
         raw.replace("\\", "\\\\").replace("'", "\\'")
+}
+
+/** Install identity for the cold-start record: "fit:" + PackageInfo.firstInstallTime (ms); null when unreadable. */
+internal fun installIdentity(context: android.content.Context): String? = try {
+    val info = context.packageManager.getPackageInfo(context.packageName, 0)
+    info.firstInstallTime.takeIf { it > 0 }?.let { "fit:$it" }
+} catch (_: Throwable) {
+    null
 }

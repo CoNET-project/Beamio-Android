@@ -1,14 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Chat keys stay on this device: the wallet key, the PGP key store and its fallback file. -->
+<!-- Chat keys stay on this device: the wallet key, the PGP key store and its fallback file.
+     The PWA bundle directory is rebuilt from the embedded ZIP and is never backed up or transferred
+     (it can exceed the backup quota and would bring back a stale bundle and completion record). -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="beamio_chat_wallet_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_plain_v1.xml" />
+        <exclude domain="file" path="silentpass_pwa/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="beamio_chat_wallet_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_plain_v1.xml" />
+        <exclude domain="file" path="silentpass_pwa/" />
     </device-transfer>
 </data-extraction-rules>

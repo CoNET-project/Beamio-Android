@@ -75,41 +75,83 @@ class EmbeddedPwaUpdateDaemon(
         }
         if (!checkInFlight.compareAndSet(false, true)) return
         try {
-            val current = bundleStore.activeVersion()
-            Log.i(TAG, "OTA check begin active=${current ?: "unknown"} pending=${bundleStore.pendingUpdateVersion() ?: ""}")
-            // Unknown active version: skip this round (no fetch, no download, no staging, no prompt); the next interval retries.
-            if (current == null) {
-                Log.w(TAG, "OTA check skipped: active version unreadable")
+            // Reference = the selected verified bundle (or the embedded constant); never an unverified active version.
+            val reference = bundleStore.selectedVerifiedVersion()
+            Log.i(TAG, "OTA check begin reference=${reference ?: "unknown"} pending=${bundleStore.pendingUpdateVersion() ?: ""}")
+            val body = try {
+                fetchManifestText()
+            } catch (e: Exception) {
+                Log.w(TAG, "OTA manifest unavailable type=${e.javaClass.simpleName}")
+                bundleStore.writeOtaStatus("network-error", null, null)
                 return
             }
-            val remote = fetchRemoteUpdateInfo() ?: run {
-                Log.w(TAG, "OTA manifest unavailable")
+            if (body == null || looksLikeHtml(body)) {
+                // Non-2xx or an HTML fallback page (captive portal, SPA catch-all): a network error, not a manifest.
+                bundleStore.writeOtaStatus("network-error", null, null)
                 return
             }
-            Log.i(TAG, "OTA manifest ver=${remote.ver} filename=${remote.filename} active=$current")
-            if (decideOtaCheck(current, remote.ver) == OtaCheckDecision.NO_NEWER) {
+            // Only a signature by a compile-time key makes a download trusted; a top-level zip_sha256 is ignored.
+            val check = bundleStore.otaVerifier.verifyManifest(body, reference)
+            val manifest = check.manifest
+            Log.i(TAG, "OTA manifest verdict=${check.verdict.code} ver=${manifest?.ver ?: "?"} reference=${reference ?: "unknown"}")
+            if (check.verdict == OtaVerdict.DOWNGRADE) {
+                bundleStore.writeOtaStatus("up-to-date", check.verdict.code, manifest?.ver)
                 Log.i(TAG, "OTA no newer version")
                 return
             }
-            val pending = bundleStore.pendingUpdateVersion()
-            if (pending == remote.ver) {
-                Log.i(TAG, "OTA staged version still pending=$pending")
-                postUpdateAvailable(current, remote.ver)
+            if (check.verdict != OtaVerdict.OK || manifest == null) {
+                bundleStore.writeOtaStatus(check.verdict.status, check.verdict.code, manifest?.ver)
                 return
             }
-            Log.i(TAG, "OTA downloading version=${remote.ver}")
-            downloadAndStage(remote)
-            Log.i(TAG, "OTA staged version=${remote.ver}")
-            postUpdateAvailable(current, remote.ver)
+            val pending = bundleStore.pendingUpdateVersion()
+            if (pending == manifest.ver) {
+                Log.i(TAG, "OTA staged version still pending=$pending")
+                postUpdateAvailable(reference ?: "", manifest.ver)
+                return
+            }
+            val sizeVerdict = bundleStore.otaVerifier.checkDownloadSize(manifest)
+            if (sizeVerdict != OtaVerdict.OK) {
+                Log.w(TAG, "OTA bundle not downloaded verdict=${sizeVerdict.code} size=${manifest.size}")
+                bundleStore.writeOtaStatus(sizeVerdict.status, sizeVerdict.code, manifest.ver)
+                return
+            }
+            Log.i(TAG, "OTA downloading version=${manifest.ver}")
+            val tempZip = File.createTempFile("silentpass_download_", ".zip")
+            try {
+                try {
+                    download(bundleBaseUrl + manifest.filename, tempZip, manifest.size)
+                } catch (e: DownloadTooLong) {
+                    Log.w(TAG, "OTA download aborted: more bytes than the signed size")
+                    bundleStore.writeOtaStatus(OtaVerdict.SIZE_MISMATCH.status, OtaVerdict.SIZE_MISMATCH.code, manifest.ver)
+                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "OTA download failed type=${e.javaClass.simpleName}")
+                    bundleStore.writeOtaStatus("network-error", null, manifest.ver)
+                    return
+                }
+                try {
+                    bundleStore.installDownloadToStaging(check, tempZip)
+                } catch (e: EmbeddedPwaBundleStore.OtaRejected) {
+                    Log.w(TAG, "OTA download not staged verdict=${e.verdict.code}: ${e.message}")
+                    bundleStore.writeOtaStatus(e.verdict.status, e.verdict.code, manifest.ver)
+                    return
+                }
+            } finally {
+                tempZip.delete()
+            }
+            bundleStore.writeOtaStatus("verified-staged", OtaVerdict.OK.code, manifest.ver)
+            Log.i(TAG, "OTA staged version=${manifest.ver}")
+            postUpdateAvailable(reference ?: "", manifest.ver)
         } catch (error: Exception) {
-            // Untrusted fetch — keep last trusted bundle; no UI wipe.
+            // Untrusted fetch: keep the last trusted bundle; no UI wipe.
             Log.e(TAG, "OTA check failed type=${error.javaClass.simpleName} message=${error.message}", error)
         } finally {
             checkInFlight.set(false)
         }
     }
 
-    private fun fetchRemoteUpdateInfo(): EmbeddedPwaUpdateInfo? {
+    /** update.json text, or null on a non-2xx answer (network error). */
+    private fun fetchManifestText(): String? {
         val conn = (URL(manifestUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 30_000
@@ -121,23 +163,14 @@ class EmbeddedPwaUpdateDaemon(
             val responseCode = conn.responseCode
             Log.i(TAG, "OTA manifest response=$responseCode")
             if (responseCode !in 200..299) return null
-            val body = conn.inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(body)
-            EmbeddedPwaUpdateInfo(
-                ver = json.getString("ver"),
-                filename = json.getString("filename"),
-                // r3oj §25.52Y.38 item 2 (h): the published hash; without it the download is never staged.
-                zipSha256 = json.optString("zip_sha256").takeIf { it.isNotEmpty() },
-            )
+            conn.inputStream.bufferedReader().use { it.readText() }
         } finally {
             conn.disconnect()
         }
     }
 
-    private fun downloadAndStage(remote: EmbeddedPwaUpdateInfo) {
-        if (!remotePwaUpdate) return
-        val downloadUrl = bundleBaseUrl + remote.filename
-        val conn = (URL(downloadUrl).openConnection() as HttpURLConnection).apply {
+    private fun download(url: String, target: File, signedSize: Long) {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 30_000
             readTimeout = 120_000
@@ -146,19 +179,9 @@ class EmbeddedPwaUpdateDaemon(
         }
         try {
             val responseCode = conn.responseCode
-            Log.i(TAG, "OTA download response=$responseCode url=$downloadUrl")
-            if (responseCode !in 200..299) {
-                throw IllegalStateException("Download failed: HTTP $responseCode")
-            }
-            val tempZip = File.createTempFile("silentpass_staging_", ".zip")
-            try {
-                conn.inputStream.use { input ->
-                    tempZip.outputStream().use { output -> input.copyTo(output) }
-                }
-                bundleStore.installDownloadToStaging(tempZip, remote.ver, remote.zipSha256)
-            } finally {
-                tempZip.delete()
-            }
+            Log.i(TAG, "OTA download response=$responseCode url=$url")
+            if (responseCode !in 200..299) throw IllegalStateException("Download failed: HTTP $responseCode")
+            conn.inputStream.use { input -> target.outputStream().use { output -> copyBounded(input, output, signedSize) } }
         } finally {
             conn.disconnect()
         }
@@ -168,8 +191,26 @@ class EmbeddedPwaUpdateDaemon(
         mainHandler.post { onUpdateAvailable(current, pending) }
     }
 
+    /** The server sent more bytes than the signed payload size; the download is stopped at once. */
+    internal class DownloadTooLong : java.io.IOException("download longer than the signed size")
+
     companion object {
         private const val TAG = "BeamioEmbeddedPwa"
+
+        /** Copies [input] to [output]; throws [DownloadTooLong] as soon as more than [limit] bytes arrive. */
+        internal fun copyBounded(input: java.io.InputStream, output: java.io.OutputStream, limit: Long): Long {
+            val buf = ByteArray(64 * 1024)
+            var total = 0L
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) return total
+                if (total + n > limit) throw DownloadTooLong()
+                output.write(buf, 0, n)
+                total += n
+            }
+        }
+
+        internal fun looksLikeHtml(body: String): Boolean = body.trimStart().startsWith("<")
         private const val CHECK_INTERVAL_MS = 15L * 60L * 1000L
     }
 }

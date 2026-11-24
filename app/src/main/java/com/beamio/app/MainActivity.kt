@@ -112,8 +112,9 @@ class MainActivity : ComponentActivity() {
             <h2>Beamio could not open its local app</h2>
             <p>The app bundle on this device could not be loaded. Your wallet and data were not deleted.</p>
             <p>本机的应用界面暂时无法加载。钱包和数据没有被删除。</p>
+            <p>アプリの内容を読み込めませんでした。ウォレットとデータは削除されていません。</p>
             <p id="s"></p>
-            <p><a href="$EMBEDDED_RETRY_URL" style="display:inline-block;padding:12px 24px;border-radius:999px;background:white;color:#000414;text-decoration:none;font-weight:bold">Retry / 重试</a></p>
+            <p><a href="$EMBEDDED_RETRY_URL" style="display:inline-block;padding:12px 24px;border-radius:999px;background:white;color:#000414;text-decoration:none;font-weight:bold">Retry / 重试 / 再試行</a></p>
             </body>
         """.trimIndent()
         private const val TAG = "MainActivity"
@@ -565,6 +566,9 @@ class MainActivity : ComponentActivity() {
 
     @Volatile
     private var useEmbeddedPwa = false
+
+    /** The bridge the embedded page was mounted with, so a trust mismatch can mount the unavailable page with Retry. */
+    private var embeddedJsBridge: CashTreesJsBridge? = null
 
     /** Consumer `beamio://open?…` → HTTPS `/app/` until WebView is mounted. */
     @Volatile
@@ -3514,6 +3518,12 @@ class MainActivity : ComponentActivity() {
             }
         }
         embeddedPwaHost = EmbeddedPwaHost(this)
+        embeddedJsBridge = jsBridge
+        // A trust check that finds the verified bundle changed takes the page down (same as a failed bootstrap):
+        // the unavailable page with Retry; Retry runs the full bootstrap, which repairs active/.
+        com.beamio.app.embedded.EmbeddedPwaBundleStore.trustMismatchListener = {
+            activeInstance?.let { activity -> activity.runOnUiThread { activity.onEmbeddedTrustMismatch() } }
+        }
         NativeKeySdkBinding.install(this)
         NativeKeyImportRoute.register(nativeKeyImportOpener)
         NativeRecoveryRoute.register(nativeRecoveryOpener)
@@ -3717,8 +3727,19 @@ class MainActivity : ComponentActivity() {
         wv.loadDataWithBaseURL(EmbeddedPwaConstants.ASSET_LOADER_ORIGIN, EMBEDDED_UNAVAILABLE_HTML, "text/html", "UTF-8", null)
     }
 
+    /** Trust mismatch on the running bundle: unmount the page and show the unavailable page with Retry (no remote fallback). */
+    private fun onEmbeddedTrustMismatch() {
+        if (!useEmbeddedPwa || !::rootLayout.isInitialized || !::webView.isInitialized) return
+        val bridge = embeddedJsBridge ?: return
+        Log.e("BeamioEmbeddedPwa", "trust mismatch: taking the page down; unavailable page with Retry")
+        val old = webView
+        rootLayout.removeView(old)
+        old.destroy()
+        mountEmbeddedUnavailableWebView(bridge)
+    }
+
     private fun retryEmbeddedBootstrap(jsBridge: CashTreesJsBridge, unavailable: WebView) {
-        unavailable.evaluateJavascript("document.getElementById('s').textContent='Loading… / 正在加载…'", null)
+        unavailable.evaluateJavascript("document.getElementById('s').textContent='Loading… / 正在加载… / 読み込み中…'", null)
         bootstrapExecutor.execute {
             try {
                 embeddedPwaHost.bootstrapIfNeeded()
@@ -3731,7 +3752,7 @@ class MainActivity : ComponentActivity() {
                 Log.e("BeamioEmbeddedPwa", "embedded PWA retry failed; still no local bundle", error)
                 runOnUiThread {
                     unavailable.evaluateJavascript(
-                        "document.getElementById('s').textContent='Still unavailable. Try again later. / 仍无法加载，请稍后再试。'",
+                        "document.getElementById('s').textContent='Still unavailable. Try again later. / 仍无法加载，请稍后再试。 / まだ読み込めません。しばらくしてから再度お試しください。'",
                         null,
                     )
                 }

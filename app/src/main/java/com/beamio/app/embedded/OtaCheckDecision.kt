@@ -8,7 +8,9 @@ internal enum class OtaCheckDecision { SKIP_ACTIVE_UNKNOWN, NO_NEWER, STAGE }
  * update.json cannot pull a remote bundle in (review, 2026-11-17: an unknown version is not 0.0.0).
  */
 internal fun decideOtaCheck(activeVersion: String?, remoteVer: String): OtaCheckDecision = when {
-    activeVersion == null -> OtaCheckDecision.SKIP_ACTIVE_UNKNOWN
+    // an active version that is not plain x.y.z is unknown, never 0; a remote version that does not
+    // parse is never "newer" (isSemverNewer is strict), so nothing is downloaded.
+    activeVersion == null || PwaVersion.parse(activeVersion) == null -> OtaCheckDecision.SKIP_ACTIVE_UNKNOWN
     !EmbeddedPwaBundleStore.isSemverNewer(activeVersion, remoteVer) -> OtaCheckDecision.NO_NEWER
     else -> OtaCheckDecision.STAGE
 }

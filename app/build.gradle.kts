@@ -4,6 +4,9 @@ import java.util.Properties
 import java.util.zip.ZipFile
 
 import java.util.Collections
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.util.zip.ZipInputStream
 
 plugins {
     alias(libs.plugins.android.application)
@@ -27,6 +30,17 @@ val otaManifestUrl = providers.gradleProperty("otaManifestUrl").orNull ?: "https
 val otaBundleBase = providers.gradleProperty("otaBundleBase").orNull ?: "https://beamio.ca/app/"
 val otaCheckIntervalMs = providers.gradleProperty("otaCheckIntervalMs").orNull?.toLong() ?: (15L * 60L * 1000L)
 val otaLocalStub = providers.gradleProperty("otaManifestUrl").orNull != null
+// QA only: one Ed25519 test public key (raw 32 bytes, base64) for end-to-end signed OTA acceptance against a local
+// stub. Allowed only with -PotaManifestUrl and -PremotePwaUpdate=true, never for store artifacts; a release built with
+// it is signed with the debug certificate and labelled "-otaqa". Formal builds have an empty QA key.
+val otaQaPublicKey: String = providers.gradleProperty("otaQaPublicKey").orNull?.trim() ?: ""
+if (otaQaPublicKey.isNotEmpty()) {
+    if (!otaLocalStub || !remotePwaUpdate) throw GradleException("-PotaQaPublicKey needs -PotaManifestUrl and -PremotePwaUpdate=true (QA stub builds only).")
+    if (!Regex("^[A-Za-z0-9+/]{43}=$").matches(otaQaPublicKey)) throw GradleException("-PotaQaPublicKey must be a base64 raw Ed25519 public key (32 bytes).")
+    if (gradle.startParameter.taskNames.any { it.contains("store", ignoreCase = true) || it.contains("bundle", ignoreCase = true) }) {
+        throw GradleException("-PotaQaPublicKey is never allowed for store or bundle artifacts.")
+    }
+}
 // Native key import binding (spec 25.25): the SDK side compiles only against the unreleased 0.2.7 line.
 // Default: src/nativekeyNone (no native key, import unavailable, shell gate passes everything through).
 val chatSdkNativeKey = providers.gradleProperty("chatSdkNativeKey").orNull == "true"
@@ -138,6 +152,44 @@ val pwaEmbedLock: Map<String, String> = file("pwa-embed.lock").takeIf { it.isFil
     ?: emptyMap()
 val embeddedPwaZipSha256: String = pwaEmbedLock["zip_sha256"]?.lowercase()
     ?.takeIf { Regex("^[0-9a-f]{64}$").matches(it) } ?: ""
+// build-time identity of the embedded package, so a fast cold start can
+// seed bridge trust without reading the APK ZIP. PWA_ZIP_VER is the lock's zip_ver (plain x.y.z only, else "").
+// PWA_CONTENT_SHA256 is the content digest of src/main/assets/SilentPassUI.zip computed exactly like the runtime
+// EmbeddedPwaBundleStore.contentLines after EmbeddedPwaZip.unzip: every non-directory entry (last one wins), __MACOSX/
+// removed, the two .loaded-* marker names skipped, one line "path\u0000sha256(contents)" per file, sorted, each line
+// plus "\n", SHA-256. It is computed only when every byte of the ZIP hashes to the lock's zip_sha256 (else ""), and
+// verifyPwaContentConstant (after verifyPwaEmbedLock) fails the build when it is missing.
+val embeddedPwaZipVer: String = pwaEmbedLock["zip_ver"]
+    ?.takeIf { Regex("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$").matches(it) } ?: ""
+val embeddedPwaContentSha256: String = run {
+    val zip = file("src/main/assets/SilentPassUI.zip")
+    if (!zip.isFile || embeddedPwaZipSha256.isEmpty()) return@run ""
+    fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
+    val bytes = zip.readBytes()
+    if (hex(MessageDigest.getInstance("SHA-256").digest(bytes)) != embeddedPwaZipSha256) return@run ""
+    val entries = LinkedHashMap<String, String>()
+    ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
+        var e = zis.nextEntry
+        while (e != null) {
+            if (!e.isDirectory) {
+                val name = File(e.name).normalize().invariantSeparatorsPath
+                if (name.startsWith("../") || name == ".." || File(name).isAbsolute) {
+                    throw GradleException("SilentPassUI.zip entry escapes the bundle: ${e.name}")
+                }
+                entries[name] = hex(MessageDigest.getInstance("SHA-256").digest(zis.readBytes()))
+            }
+            zis.closeEntry()
+            e = zis.nextEntry
+        }
+    }
+    val markers = setOf(".loaded-sha256", ".loaded-content-sha256")
+    val lines = entries.filterKeys { k -> k != "__MACOSX" && !k.startsWith("__MACOSX/") && k.substringAfterLast('/') !in markers }
+        .map { (k, v) -> "$k\u0000$v" }
+        .sorted()
+    val all = MessageDigest.getInstance("SHA-256")
+    lines.forEach { all.update((it + "\n").toByteArray(Charsets.UTF_8)) }
+    hex(all.digest())
+}
 // Spec r3np §25.52Y.38 item 2 (a) / r3nq §25.52Y.41 item 3: the embedded PWA's capability bits (e.g. the walletCredential bit)
 // come only from the build manifest handed to the PWA version gate (-PpwaFreezeManifest or -PpwaQaManifest, with
 // -PpwaUnreleasedTest=true): its "capabilities" array of strings, bound to its zip_sha256, which must equal pwa-embed.lock.
@@ -190,8 +242,8 @@ android {
         applicationId = if (qaReleaseVariant) "com.beamio.app.t168r" else "com.beamio.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 189
-        versionName = "1.0.171"
+        versionCode = 191
+        versionName = "1.0.173"
 
         // t168r (AH.6 item 3): a plain framework Instrumentation, since the minified release app lacks androidx.tracing.
         testInstrumentationRunner = if (qaReleaseVariant) "com.beamio.app.ah6.Ah6BridgeInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"
@@ -199,6 +251,11 @@ android {
         // SHA-256 of the bundled SilentPassUI.zip; the store bootstrap refuses to load anything else.
         // With -PpwaFreezeManifest the preBuild gate already requires this file to equal the frozen zip_sha256.
         buildConfigField("String", "PWA_ZIP_SHA256", "\"$embeddedPwaZipSha256\"")
+        // content digest and version of that same package (build-time constants, see above).
+        buildConfigField("String", "PWA_CONTENT_SHA256", "\"$embeddedPwaContentSha256\"")
+        buildConfigField("String", "PWA_ZIP_VER", "\"$embeddedPwaZipVer\"")
+        // QA-only OTA test key (empty in every formal build; see otaQaPublicKey above).
+        buildConfigField("String", "OTA_QA_PUBLIC_KEY", "\"$otaQaPublicKey\"")
         // §25.52Y.38 item 2 (a): capability bits of that same package and the zip_sha256 they are bound to ("" when none).
         buildConfigField("String", "PWA_CAPABILITIES", "\"${pwaCapabilities.joinToString(",")}\"")
         buildConfigField("String", "PWA_CAPABILITIES_ZIP_SHA256", "\"${if (pwaCapabilities.isEmpty()) "" else embeddedPwaZipSha256}\"")
@@ -208,11 +265,21 @@ android {
     }
     // Every build type carries the label; only debugqa sets it (HD.2: products are marked QA).
     defaultConfig.buildConfigField("String", "QA_BUILD_LABEL", "\"\"")
+    dependenciesInfo {
+        // The website APK must rebuild byte for byte from its commit. The dependency block AGP adds to an APK's signing
+        // block is encrypted afresh on every build, so it is left out of APKs. The store AAB keeps it (Play uses it); the
+        // store universal APK is produced from the bundle and is unaffected.
+        includeInApk = false
+        includeInBundle = true
+    }
     packaging {
         // bcprov, bcutil and bcpg each ship META-INF/LICENSE.md (same BC MIT text); keep one copy.
         resources { pickFirsts += setOf("META-INF/LICENSE.md") }
     }
     sourceSets {
+        // Manifest v2 golden-vector runner shared by the JVM unit tests and the instrumented test (API 24–32).
+        getByName("test").let { it.java.directories.add("src/sharedTest/java"); it.kotlin.directories.add("src/sharedTest/java") }
+        getByName("androidTest").let { it.java.directories.add("src/sharedTest/java"); it.kotlin.directories.add("src/sharedTest/java") }
         // Remote PWA update code (manifest, download, staging) only in non-store build types.
         getByName("debug").let { it.java.directories.add("src/ota/java"); it.kotlin.directories.add("src/ota/java") }
         getByName("release").let { it.java.directories.add("src/ota/java"); it.kotlin.directories.add("src/ota/java") }
@@ -286,8 +353,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            if (qaReleaseVariant) {
+            if (qaReleaseVariant || otaQaPublicKey.isNotEmpty()) {
+                // QA stub builds (test OTA key) are never signed with the upload key.
                 signingConfig = signingConfigs.getByName("debug")
+                if (otaQaPublicKey.isNotEmpty()) versionNameSuffix = "-otaqa"
             } else if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -329,6 +398,12 @@ android {
     testOptions {
         // Local unit tests call android.util.Log through EmbeddedPwaBundleStore.
         unitTests.isReturnDefaultValues = true
+        // Manifest v2 golden vectors (TEST ONLY, outside the repository): -PotaVectorsDir=<dir with vectors.json, zips/>
+        // and -PotaGoldenZip=<frozen SilentPassUI-0.53.48.zip>. Without them the vector test is skipped.
+        unitTests.all { t ->
+            providers.gradleProperty("otaVectorsDir").orNull?.let { t.systemProperty("beamio.otaVectorsDir", it) }
+            providers.gradleProperty("otaGoldenZip").orNull?.let { t.systemProperty("beamio.otaGoldenZip", it) }
+        }
     }
 }
 
@@ -379,6 +454,18 @@ val verifyPwaEmbedLock by tasks.registering(Exec::class) {
     }
 }
 tasks.named("preBuild") { dependsOn(verifyPwaEmbedLock) }
+// the content constant must exist whenever the lock exists (it is derived only from a ZIP whose every
+// byte matches the lock's zip_sha256); otherwise a fast cold start could not seed trust and the build is refused.
+val verifyPwaContentConstant by tasks.registering {
+    mustRunAfter(verifyPwaEmbedLock)
+    doLast {
+        if (embeddedPwaZipSha256.isNotEmpty() && embeddedPwaContentSha256.isEmpty()) {
+            throw GradleException("PWA_CONTENT_SHA256 missing: src/main/assets/SilentPassUI.zip does not match pwa-embed.lock zip_sha256")
+        }
+        println("{\"gate\":\"pwa-content-constant\",\"result\":\"PASS\",\"zip_ver\":\"$embeddedPwaZipVer\",\"content_sha256\":\"${embeddedPwaContentSha256.take(8)}\"}")
+    }
+}
+tasks.named("preBuild") { dependsOn(verifyPwaContentConstant) }
 
 /**
  * PWA version gate (since 2026-11-11): the shell must embed the latest

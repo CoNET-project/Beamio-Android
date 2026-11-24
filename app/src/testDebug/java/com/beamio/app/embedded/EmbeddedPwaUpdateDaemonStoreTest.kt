@@ -69,14 +69,13 @@ class EmbeddedPwaUpdateDaemonStoreTest {
     fun storeN1RemoteManifestWithHigherVersionIsNeverRequested() {
         bundledZip = zipOf(bundledVersion)
         val remoteZip = zipOf(higherVersion)
-        val remoteSha = java.security.MessageDigest.getInstance("SHA-256").digest(remoteZip).joinToString("") { "%02x".format(it) }
         val requests = java.util.concurrent.atomic.AtomicInteger(0)
         val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { ex ->
             requests.incrementAndGet()
             val body = if (ex.requestURI.path.endsWith("update.json")) {
-                // r3oj §25.52Y.38 item 2 (h): the published update.json carries the zip's sha256, or nothing is staged
-                """{"ver":"$higherVersion","filename":"SilentPassUI-$higherVersion.zip","zip_sha256":"$remoteSha"}""".toByteArray()
+                // Signed manifest v2 (test key); a top-level zip_sha256 alone is never trusted.
+                OtaTestSigner.signedUpdateJson(remoteZip, higherVersion).toByteArray()
             } else {
                 remoteZip
             }
@@ -102,7 +101,8 @@ class EmbeddedPwaUpdateDaemonStoreTest {
             // Control: the same harness with remote update enabled does download and stage 0.52.999,
             // so the zero above comes from the store switch, not from a broken harness.
             val otaRoot = tmp.newFolder("ota_control")
-            val otaStore = EmbeddedPwaBundleStore(otaRoot, { ByteArrayInputStream(bundledZip!!) }, hashStore)
+            val otaStore = EmbeddedPwaBundleStore(otaRoot, { ByteArrayInputStream(bundledZip!!) }, hashStore,
+                expectedZipSha256 = sha256(bundledZip!!), embeddedZipVer = bundledVersion, otaKeys = OtaTestSigner.keys)
             otaStore.bootstrapIfNeeded()
             EmbeddedPwaUpdateDaemon(otaStore, { _, _ -> }, remotePwaUpdate = true, manifestUrl = base + "update.json", bundleBaseUrl = base)
                 .performCheck()
@@ -127,7 +127,7 @@ class EmbeddedPwaUpdateDaemonStoreTest {
                 zip.closeEntry()
             }
         }
-        return out.toByteArray()
+        return OtaTestSigner.canonicalize(out.toByteArray())
     }
 
     private fun sha256(bytes: ByteArray): String =

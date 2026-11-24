@@ -9,6 +9,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -43,6 +44,15 @@ class EmbeddedPwaBundleStoreTest {
         rootDir = root,
         openBundledZip = { ByteArrayInputStream(checkNotNull(bundledZip) { "no bundled zip" }) },
         activatedAssetHash = hashStore,
+    )
+
+    /** Release store with the test signing key; [embeddedVer] is the reference when active/ is not verified. */
+    private fun otaStore(embeddedVer: String = "0.52.927") = EmbeddedPwaBundleStore(
+        rootDir = root,
+        openBundledZip = { ByteArrayInputStream(checkNotNull(bundledZip) { "no bundled zip" }) },
+        activatedAssetHash = hashStore,
+        embeddedZipVer = embeddedVer,
+        otaKeys = OtaTestSigner.keys,
     )
 
     // index.html check
@@ -146,10 +156,10 @@ class EmbeddedPwaBundleStoreTest {
     @Test
     fun otaDownloadOfWebBuildIsRejected() {
         writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.927")
-        val store = newStore()
+        val store = otaStore()
         val zip = tmp.newFile("web.zip").apply { writeBytes(zipOf(assetPrefix = "/app", version = "9.9.9")) }
 
-        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes())) }
+        assertThrows(IllegalStateException::class.java) { OtaTestSigner.stage(store, zip, "9.9.9") }
 
         assertFalse(store.stagingDir.exists())
         assertNull(store.pendingUpdateVersion())
@@ -159,10 +169,10 @@ class EmbeddedPwaBundleStoreTest {
     @Test
     fun otaDownloadOfEmbeddedBuildIsStagedAndPromoted() {
         writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.927")
-        val store = newStore()
+        val store = otaStore()
         val zip = tmp.newFile("ok.zip").apply { writeBytes(zipOf(assetPrefix = "", version = "9.9.9")) }
 
-        store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes()))
+        OtaTestSigner.stage(store, zip, "9.9.9")
         assertEquals("9.9.9", store.pendingUpdateVersion())
 
         store.promoteStagingToActive()
@@ -273,7 +283,7 @@ class EmbeddedPwaBundleStoreTest {
         assertNull(store.pendingUpdateVersion())
         assertThrows(IllegalStateException::class.java) { store.promoteStagingToActive() }
         val zip = tmp.newFile("remote.zip").apply { writeBytes(zipOf(assetPrefix = "", version = higherVersion)) }
-        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, higherVersion, sha256(zip.readBytes())) }
+        assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(OtaManifestCheck(OtaVerdict.OK), zip) }
         assertEquals(before, store.contentDigest(store.activeDir))
 
         store.bootstrapIfNeeded() // next cold start
@@ -476,14 +486,30 @@ class EmbeddedPwaBundleStoreTest {
 
     @Test
     fun stagedStrictlyNewerThanActiveIsPromoted() {
+        // only a staged bundle with a verified-download record (installDownloadToStaging) is promoted.
         writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.932")
-        val store = newStore()
-        writeBundle(store.stagingDir, assetPrefix = "", version = "0.52.933")
+        val store = otaStore(embeddedVer = "0.52.932")
+        val zip = tmp.newFile("ota-933.zip").apply { writeBytes(zipOf(assetPrefix = "", version = "0.52.933")) }
+        OtaTestSigner.stage(store, zip, "0.52.933")
 
         store.promoteStagingToActive()
 
         assertEquals("0.52.933", store.activeVersion())
         assertActiveIsEmbedded(store)
+    }
+
+    @Test
+    fun stagedStrictlyNewerWithoutVerifiedRecordIsRefusedAndDiscarded() {
+        // a staging written outside installDownloadToStaging (no ota-verified record) is never promoted.
+        writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.932")
+        val store = newStore()
+        writeBundle(store.stagingDir, assetPrefix = "", version = "0.52.933")
+
+        val error = assertThrows(IllegalStateException::class.java) { store.promoteStagingToActive() }
+
+        assertEquals("staged_not_verified", error.message)
+        assertEquals("0.52.932", store.activeVersion())
+        assertFalse(store.stagingDir.exists())
     }
 
     // helpers
@@ -663,14 +689,16 @@ class EmbeddedPwaBundleStoreTest {
 
     @Test
     fun trustRecordAbsentWhenANewerDownloadedBundleIsActive() {
+        // a higher-version active with no verified-download record cannot be
+        // verified by this shell. Markers in active/ are not a record, so it is repaired with the embedded ZIP rather
+        // than kept, and trust is only that of the embedded ZIP.
         val zip = zipOf("", "1.0.0")
         val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(zip) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = sha256(zip))
         writeBundle(store.activeDir, "", "2.0.0")
-        // A downloaded bundle cannot plant trust: markers in active/ are not the record.
         File(store.activeDir, EmbeddedPwaBundleStore.LOADED_SHA_MARKER).writeText(sha256(zip))
         store.bootstrapIfNeeded()
-        assertEquals("2.0.0", store.activeVersion())
-        assertNull(store.verifiedActiveZipSha256())
+        assertEquals("1.0.0", store.activeVersion())
+        assertEquals(sha256(zip), store.verifiedActiveZipSha256())
     }
 
     @Test
@@ -684,26 +712,41 @@ class EmbeddedPwaBundleStoreTest {
     // r3oj §25.52Y.38 item 2 (h): downloaded bundles are trusted per package, against the published zip_sha256.
 
     @Test
-    fun otaDownloadIsStagedOnlyWithTheMatchingPublishedHash() {
+    fun otaDownloadIsStagedOnlyWithAValidSignature() {
         writeBundle(File(root, "active"), assetPrefix = "", version = "0.52.927")
-        val store = newStore()
-        val zip = tmp.newFile("ota.zip").apply { writeBytes(zipOf(assetPrefix = "", version = "9.9.9")) }
-        for (bad in listOf(null, "", "0".repeat(64), sha256(zip.readBytes()).uppercase().take(63))) {
-            assertThrows(IllegalStateException::class.java) { store.installDownloadToStaging(zip, "9.9.9", bad) }
+        val store = otaStore()
+        val bytes = zipOf(assetPrefix = "", version = "9.9.9")
+        val zip = tmp.newFile("ota.zip").apply { writeBytes(bytes) }
+        val p = OtaTestSigner.payload(bytes, "9.9.9")
+        val bad = listOf(
+            OtaTestSigner.updateJson(p, null, "9.9.9"),                                       // no signature
+            OtaTestSigner.updateJson(p, OtaTestSigner.sign(p, OtaTestSigner.untrusted), "9.9.9"), // unknown key
+            OtaTestSigner.updateJson(p, OtaTestSigner.sign(p, domain = "beamio-pwa-ota/v1\n"), "9.9.9"), // v1 domain
+            OtaTestSigner.updateJson(p, OtaTestSigner.sign(p), "9.9.8"),                     // outer/payload mismatch
+            OtaTestSigner.payload(bytes, "9.9.9", sha256 = "0".repeat(64)).let { q -> OtaTestSigner.updateJson(q, OtaTestSigner.sign(q), "9.9.9") }, // hash
+            OtaTestSigner.payload(bytes, "9.9.9", contentDigest = "1".repeat(64)).let { q -> OtaTestSigner.updateJson(q, OtaTestSigner.sign(q), "9.9.9") }, // content
+        )
+        for (doc in bad) {
+            assertThrows(IllegalStateException::class.java) {
+                store.installDownloadToStaging(store.otaVerifier.verifyManifest(doc, store.selectedVerifiedVersion()), zip)
+            }
             assertFalse(store.stagingDir.exists()); assertNull(store.pendingUpdateVersion())
         }
-        store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes()).uppercase()) // case-insensitive hash
+        // a top-level zip_sha256 alone is never trust
+        val unsignedWithHash = JSONObject().put("ver", "9.9.9").put("filename", "SilentPassUI-9.9.9.zip").put("zip_sha256", sha256(bytes)).toString()
+        assertEquals(OtaVerdict.MISSING_SIGNATURE, store.otaVerifier.verifyManifest(unsignedWithHash, "0.52.927").verdict)
+        OtaTestSigner.stage(store, zip, "9.9.9")
         assertEquals("9.9.9", store.pendingUpdateVersion())
     }
 
     @Test
     fun verifiedOtaBundleIsTrustedWhenActiveAndOnlyWhileUnchanged() {
         val bundled = zipOf("", "1.0.0")
-        val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(bundled) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = sha256(bundled))
+        val store = EmbeddedPwaBundleStore(root, { ByteArrayInputStream(bundled) }, hashStore, remotePwaUpdate = true, expectedZipSha256 = sha256(bundled), otaKeys = OtaTestSigner.keys)
         store.bootstrapIfNeeded()
         assertEquals(sha256(bundled), store.verifiedActiveZipSha256())
         val ota = tmp.newFile("ota2.zip").apply { writeBytes(zipOf("", "2.0.0", padding = 2)) }
-        store.installDownloadToStaging(ota, "2.0.0", sha256(ota.readBytes()))
+        OtaTestSigner.stage(store, ota, "2.0.0")
         store.promoteStagingToActive()
         assertEquals("2.0.0", store.activeVersion())
         assertEquals(sha256(ota.readBytes()), store.verifiedActiveZipSha256())
@@ -718,7 +761,7 @@ class EmbeddedPwaBundleStoreTest {
 
     @Test
     fun otaRecordCannotBePlantedByTheDownloadedZip() {
-        val store = newStore()
+        val store = otaStore()
         val evilDigest = "a".repeat(64)
         val zip = tmp.newFile("evil.zip").apply {
             val out = ByteArrayOutputStream()
@@ -730,8 +773,9 @@ class EmbeddedPwaBundleStoreTest {
             }
             writeBytes(out.toByteArray())
         }
-        runCatching { store.installDownloadToStaging(zip, "9.9.9", sha256(zip.readBytes())) }
+        runCatching { OtaTestSigner.stage(store, zip, "9.9.9") }
         assertFalse(File(root, "${EmbeddedPwaBundleStore.OTA_RECORD_DIR}/$evilDigest.json").exists())
+        assertFalse(store.stagingDir.exists()) // not canonical: rejected before unpacking
     }
 
     private fun assertActiveIsEmbedded(store: EmbeddedPwaBundleStore) {
@@ -761,7 +805,7 @@ class EmbeddedPwaBundleStoreTest {
                 zip.closeEntry()
             }
         }
-        return out.toByteArray()
+        return OtaTestSigner.canonicalize(out.toByteArray())
     }
 
     private fun sha256(bytes: ByteArray): String =
