@@ -12,7 +12,7 @@ It provides a fast, optimized WebView container for the Beamio app (website `htt
 
 ## Build status: formal chat SDK pinned
 
-`app/chat-sdk.lock` pins the formal public chat SDK `network.conet:chat:0.2.29` (`chat_sdk_qa=false`). The build resolves
+`app/chat-sdk.lock` pins the formal public chat SDK `network.conet:chat:0.2.30` (`chat_sdk_qa=false`). The build resolves
 that version and fails unless the AAR matches the pinned SHA-256. A QA-only SDK (`chat_sdk_qa=true`) would make store
 packaging fail on purpose (`verifyChatSdkNotQaForStore`); changing the pin is done in its own reviewed commit.
 

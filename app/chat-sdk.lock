@@ -4,10 +4,11 @@
 # Maven: network.conet:chat:0.2.6, source repo https://github.com/CoNET-project/chat-sdk-android, publish commit 3a8e601.
 # Replaces the 0.2.23 proposal; 0.2.23 is not used (its init and provisionIdentity refuse key material).
 # Pinned 2026-11-23: formal network.conet:chat:0.2.29, main fc1a276 on chat-sdk-android (replaces 0.2.28 f4b10cb).
+# Pinned 2026-11-24: formal network.conet:chat:0.2.30, main 6b48bb0 on chat-sdk-android (replaces 0.2.29 fc1a276).
 # Source and code commit are recorded as the published main commit; the AAR hash below is the binding pin.
 # Only the AAR is pinned by the build; pom, module and sources jar were checked online at lock time.
-chat_sdk_version=0.2.29
-chat_sdk_aar_sha256=a27e0addfa818561b22c48cfb0c605a8718afb74f586b7b963ddb6477d55aaa6
-chat_sdk_source_commit=fc1a276eed2961c35173d98251795fceb4670e55
-chat_sdk_code_commit=fc1a276eed2961c35173d98251795fceb4670e55
+chat_sdk_version=0.2.30
+chat_sdk_aar_sha256=351456775808a6257b57170717d5f0a1d83e1e5d1409b246206dfb6a1975f7c1
+chat_sdk_source_commit=6b48bb056753999eb1a3aee9a8838a5de690ac64
+chat_sdk_code_commit=6b48bb056753999eb1a3aee9a8838a5de690ac64
 chat_sdk_qa=false
