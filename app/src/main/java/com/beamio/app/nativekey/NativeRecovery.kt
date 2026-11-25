@@ -4,16 +4,16 @@ import org.json.JSONObject
 import java.lang.ref.WeakReference
 
 /**
- * Native recovery with a recovery code (PWA `nativeRecovery.ts`, spec 25.26.4e r3h). QA shell side only.
+ * Native recovery engine hookup (PWA `nativeRecovery.ts`). Since 192 (spec r3sc, plan A / P1) there is no native recovery page:
  *
- * - The page sends `{type:"nativeRecoveryOpen", reqId}` (no data) on the chat-module channel. The shell answers with an
- *   ack and, when recovery is available, opens the native recovery page. The recovery code is typed only on that page.
- * - When recovery ends, the result `{type:"nativeRecoveryResult", reqId, code}` is sent (by the SDK, with the page's reqId) plus the public address (`eoa`, only with
- *   `ok`) or `cooldownSec` (only with `backoff`). Nothing secret goes back to the page.
+ * - The page sends `{type:"nativeRecoveryOpen", reqId}` (no data) on the chat-module channel. The SDK calls its launcher; the shell
+ *   opens a headless session ([NativeRecoveryHeadless]) and shows nothing. The SDK keeps the page's reqId.
+ * - The page then sends the shell action `nativeRecoverySubmit` (`{path:"code", code}` or `{path:"account", name, password}`) on the
+ *   trusted `window.BeamioShell` WebMessage channel, or `nativeRecoveryCancel`. The shell turns the secret into a CharArray at once and
+ *   hands it to the SDK engine (NativeRecovery.restoreWithRecoveryCode / restoreWithAccountPassword).
+ * - The result `{type:"nativeRecoveryResult", reqId, code}` is sent by the SDK with the page's reqId, plus `eoa` (only with `ok`) or
+ *   `cooldownSec` (only with `backoff`). The mnemonic and the key stay native; nothing secret goes back to the page.
  * - `nativeRecoveryOpen` is not `nativeImportOpen` (private key import): the two are never mapped onto each other.
- * - The recovery itself (look up and decrypt the record, store the key natively) belongs to the Android SDK. Until the
- *   SDK provides it, [NativeRecoveryBackends.current] is [NativeRecoveryBackend.Unavailable] and the open is answered
- *   `not_supported`.
  */
 object NativeRecoveryProtocol {
     const val OPEN_COMMAND = "nativeRecoveryOpen"
@@ -163,7 +163,7 @@ object NativeRecoveryFlow {
     }
 }
 
-/** Connects the SDK's `NativeRecoveryHost.launcher` to the activity on screen (MainActivity registers itself). */
+/** Connects the SDK's `NativeRecoveryHost.launcher` to the activity on screen (MainActivity registers its headless opener). */
 object NativeRecoveryRoute {
     private var opener: WeakReference<() -> Boolean>? = null
 
@@ -177,7 +177,7 @@ object NativeRecoveryRoute {
         if (opener?.get() === open) opener = null
     }
 
-    /** Called by the SDK launcher. `true` only when the page was (or is being) shown. */
+    /** Called by the SDK launcher. `true` only when a headless session was opened. */
     fun open(): Boolean {
         if (!NativeRecoveryBackends.current.supported) return false
         val o = synchronized(this) { opener?.get() } ?: return false
@@ -185,3 +185,86 @@ object NativeRecoveryRoute {
     }
 }
 
+
+/**
+ * The headless recovery session (spec r3sc R3/R4, plan A / P1). No UI is ever shown: [open] only records that the SDK has a page
+ * session (it holds the page's reqId), and the page's `nativeRecoverySubmit` runs the engine through [NativeRecoveryFlow].
+ *
+ * - One submission at a time. A failure keeps the session open (the page may submit again); `ok` ends it, as in the SDK host.
+ * - [cancel] ends the session; the SDK then sends `cancelled` to the page if no result was sent (NativeRecoveryHost.pageClosed).
+ * - Every secret array is wiped by [NativeRecoveryFlow] in all cases. Nothing here logs; callers log the action name and code only.
+ */
+object NativeRecoveryHeadless {
+    /** Answers of the shell actions (r3sc R4). The engine's result goes to the page as `nativeRecoveryResult`, not here. */
+    const val NOT_AVAILABLE = "not_available"
+    const val BAD_ARGS = "bad_args"
+    const val ORIGIN_REFUSED = "origin_refused"
+
+    @Volatile
+    private var sessionOpen = false
+    private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Runs the engine call (it waits for the SDK callback, up to 90 s); replaced by tests. */
+    @Volatile
+    var executor: java.util.concurrent.Executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "beamio-recovery").apply { isDaemon = true }
+    }
+
+    /** Told after each engine result (the screen guard re-checks the key state). Never given a secret. */
+    @Volatile
+    var onOutcome: ((RecoveryOutcome) -> Unit)? = null
+
+    /** The SDK launcher (through [NativeRecoveryRoute]): opens the session, never a page. */
+    fun open(backend: NativeRecoveryBackend = NativeRecoveryBackends.current): Boolean {
+        if (!backend.supported) return false
+        sessionOpen = true
+        return true
+    }
+
+    fun isOpen(): Boolean = sessionOpen
+
+    /**
+     * Path A. Returns null when accepted (the result follows as an SDK event), else the refusal code. The shell does no format check
+     * (spec r3se R3SB-5): an empty, blank or wrong-length code goes to the engine, which answers invalid_format in the result event.
+     * [code] is wiped in every case.
+     */
+    fun submitCode(code: CharArray, backend: NativeRecoveryBackend = NativeRecoveryBackends.current): String? =
+        start({ code.fill('\u0000') }) { NativeRecoveryFlow.sanitize(backend.recover(code)) }
+
+    /** Path B. Same contract as [submitCode]; the name is passed as given (no normalisation); [password] is wiped in every case. */
+    fun submitAccount(name: String, password: CharArray, backend: NativeRecoveryBackend = NativeRecoveryBackends.current): String? =
+        start({ password.fill('\u0000') }) { NativeRecoveryFlow.sanitize(backend.recoverWithPassword(name, password)) }
+
+    private fun start(wipe: () -> Unit, run: () -> RecoveryOutcome): String? {
+        if (!sessionOpen || !inFlight.compareAndSet(false, true)) {
+            wipe()
+            return NOT_AVAILABLE
+        }
+        try {
+            executor.execute {
+                val outcome = try {
+                    run()
+                } catch (_: Exception) {
+                    RecoveryOutcome(RecoveryCode.RECORD_INVALID)
+                } finally {
+                    wipe()
+                    inFlight.set(false)
+                }
+                if (outcome.code == RecoveryCode.OK) sessionOpen = false
+                runCatching { onOutcome?.invoke(outcome) }
+            }
+        } catch (_: Exception) {
+            wipe()
+            inFlight.set(false)
+            return NOT_AVAILABLE
+        }
+        return null
+    }
+
+    /** The page left the form (or reloaded, or the activity is gone): the session ends and the SDK reports `cancelled` once. */
+    fun cancel(backend: NativeRecoveryBackend = NativeRecoveryBackends.current) {
+        val wasOpen = sessionOpen
+        sessionOpen = false
+        if (wasOpen) runCatching { backend.cancel() }
+    }
+}

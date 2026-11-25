@@ -138,23 +138,26 @@ class NativeRecoveryTest {
     }
 
     /**
-     * The SDK (0.2.10) owns the protocol: MainActivity no longer intercepts the command; the SDK binding registers the
-     * recovery page as NativeRecoveryHost.launcher (its own route, never the import route); the page is FLAG_SECURE.
+     * The SDK owns the protocol: MainActivity does not intercept the command; the SDK binding registers the shell route as
+     * NativeRecoveryHost.launcher (never the import route). Since 192 (spec r3sc R3) the route opens a headless session and no
+     * native recovery page exists (no activity, no manifest entry, no native_recovery_* strings).
      */
     @Test
-    fun sdkOwnsTheProtocolAndRecoveryNeverOpensTheImportPage() {
+    fun sdkOwnsTheProtocolAndTheRecoveryRouteIsHeadless() {
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertFalse(main.contains("NativeRecoveryFlow.intercept("))
         assertTrue(main.contains("NativeRecoveryRoute.register("))
+        assertTrue(main.contains("NativeRecoveryHeadless.open()"))
+        assertFalse(main.contains("NativeRecoveryActivity"))
         val binding = File("src/nativekeySdk/java/com/beamio/app/nativekey/NativeKeySdkBinding.kt").readText()
         assertTrue(binding.contains("NativeRecoveryHost.launcher = { NativeRecoveryRoute.open() }"))
-        // SDK 0.2.27 (spec r2.3 41(1)): the native import page is removed; no import launcher is set any more.
         assertFalse(binding.contains("NativeImportHost.launcher ="))
         assertFalse(Regex("NativeRecoveryHost\\.launcher[^\\n]*Import").containsMatchIn(binding))
-        val page = File("src/main/java/com/beamio/app/nativekey/NativeRecoveryActivity.kt").readText()
-        assertTrue(page.contains("FLAG_SECURE") && page.contains("configureSecureInput"))
-        assertFalse(page.contains("Log."))
-        assertFalse(page.contains("NativeKeyImportRoute") || page.contains("nativeImportOpen"))
+        assertFalse(File("src/main/java/com/beamio/app/nativekey/NativeRecoveryActivity.kt").exists())
+        assertFalse(File("src/main/AndroidManifest.xml").readText().contains("NativeRecoveryActivity"))
+        for (res in listOf("src/main/res/values/strings.xml", "src/main/res/values-zh/strings.xml")) {
+            assertFalse(res, File(res).readText().contains("native_recovery_"))
+        }
     }
 
     @Test

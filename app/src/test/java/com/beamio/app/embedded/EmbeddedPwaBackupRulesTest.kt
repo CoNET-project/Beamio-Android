@@ -8,7 +8,9 @@ import javax.xml.parsers.DocumentBuilderFactory
 
 /**
  * The PWA bundle directory (files/silentpass_pwa/, rebuilt from the embedded ZIP) is excluded from Auto Backup and from
- * device transfer; the three chat key preferences stay excluded. Every rule set must list exactly these exclusions.
+ * device transfer; the three chat key preferences stay excluded; since 192 the WebView data directory (app_webview/), the native
+ * vault directory (native_wallet_v1/) and the account PGP store too. The local chat history (conet-chat) is deliberately not excluded.
+ * Every rule set must list exactly these exclusions.
  */
 class EmbeddedPwaBackupRulesTest {
     private val expected = setOf(
@@ -16,6 +18,11 @@ class EmbeddedPwaBackupRulesTest {
         "sharedpref:beamio_chat_pgp_v1.xml",
         "sharedpref:beamio_chat_pgp_plain_v1.xml",
         "file:${EmbeddedPwaConstants.ROOT_DIR_NAME}/",
+        // 192 (plan E6): the WebView data directory (page IndexedDB / localStorage) is never backed up or transferred
+        "root:app_webview/",
+        // 192: Keystore-wrapped stores; their keys never leave the device, so a restored copy could not be opened
+        "file:native_wallet_v1/",
+        "sharedpref:beamio_sdk_account_pgp_k_v1.xml",
     )
 
     private fun res(name: String): File =
@@ -45,6 +52,16 @@ class EmbeddedPwaBackupRulesTest {
             val el = nodes.item(0) as Element
             assertEquals(section, expected, excludes(el))
             assertEquals(section, 0, el.getElementsByTagName("include").length)
+        }
+    }
+
+    /** 192: the chat history is keyed from the account key (HKDF), not from Keystore, so it stays in backup and transfer. */
+    @Test
+    fun chatHistoryIsNotExcluded() {
+        for (name in listOf("backup_rules.xml", "data_extraction_rules.xml")) {
+            val root = doc(name)
+            val sections = listOf(root) + listOf("cloud-backup", "device-transfer").mapNotNull { root.getElementsByTagName(it).item(0) as? Element }
+            for (el in sections) assertEquals(name, false, excludes(el).any { it.contains("conet-chat") })
         }
     }
 

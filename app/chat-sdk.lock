@@ -7,8 +7,10 @@
 # Pinned 2026-11-24: formal network.conet:chat:0.2.30, main 6b48bb0 on chat-sdk-android (replaces 0.2.29 fc1a276).
 # Source and code commit are recorded as the published main commit; the AAR hash below is the binding pin.
 # Only the AAR is pinned by the build; pom, module and sources jar were checked online at lock time.
-chat_sdk_version=0.2.30
-chat_sdk_aar_sha256=351456775808a6257b57170717d5f0a1d83e1e5d1409b246206dfb6a1975f7c1
-chat_sdk_source_commit=6b48bb056753999eb1a3aee9a8838a5de690ac64
-chat_sdk_code_commit=6b48bb056753999eb1a3aee9a8838a5de690ac64
+# Pinned 2026-11-25: formal network.conet:chat:0.2.32, main and tag v0.2.32 at aa56cd0 on chat-sdk-android (replaces 0.2.30 6b48bb0);
+# enables accountCreateRegister in formal builds (spec r3si/r3sj item 63).
+chat_sdk_version=0.2.32
+chat_sdk_aar_sha256=9222188db7a6805992fa42814e313fc3a8eae0fffb500870105885acff0d9d58
+chat_sdk_source_commit=aa56cd0f01e7497101e835de2eb86a56519f1900
+chat_sdk_code_commit=aa56cd0f01e7497101e835de2eb86a56519f1900
 chat_sdk_qa=false

@@ -99,22 +99,6 @@
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.CaehTrees" />
-        <!-- QA: native recovery with a recovery code (PWA nativeRecoveryOpen). Opened only by the shell. -->
-        <activity
-            android:name="com.beamio.app.nativekey.NativeAccountCreateActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:resizeableActivity="true"
-            android:theme="@style/Theme.CaehTrees" />
-        <activity
-            android:name="com.beamio.app.nativekey.NativeRecoveryActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:resizeableActivity="true"
-            android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.CaehTrees" />
 
         <!--
           Dedicated singleInstance task. Same-task translucent glass under a

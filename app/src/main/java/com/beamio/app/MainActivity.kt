@@ -31,6 +31,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.PixelCopy
 import android.view.View
+import android.view.WindowManager
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.webkit.JavascriptInterface
@@ -72,12 +73,16 @@ import org.json.JSONArray
 import org.json.JSONObject
 import com.beamio.app.nativekey.NativeKeyImportActivity
 import com.beamio.app.nativekey.NativeKeyImportRoute
-import com.beamio.app.nativekey.NativeAccountCreateActivity
+import com.beamio.app.nativekey.NativeAccountCreateBackends
+import com.beamio.app.nativekey.ShellAccountCreateAction
 import com.beamio.app.qa.QaWriteGuard
 import com.beamio.app.legacy.ShellRecordChannel
 import com.beamio.app.legacy.PgpMigrationRunner
 import com.beamio.app.nativekey.NativeAccountCreateRoute
-import com.beamio.app.nativekey.NativeRecoveryActivity
+import com.beamio.app.nativekey.NativeRecoveryHeadless
+import com.beamio.app.nativekey.NativeRecoveryShellAction
+import com.beamio.app.nativekey.NativeKeyBackends
+import com.beamio.app.nativekey.OnboardingScreenGuard
 import com.beamio.app.nativekey.NativeRecoveryRoute
 import com.beamio.app.nativekey.NativeKeySdkBinding
 import com.beamio.app.nativekey.ShellNoKeyGate
@@ -1792,6 +1797,11 @@ class MainActivity : ComponentActivity() {
          * `{ action: "chatModuleEvent", event }` and `{ action: "chatModuleSignRequest", … }`.
          */
         open fun chatModuleCommand(json: String) {
+            // r3se R4(b) (RN-01): the recovery shell actions are window.BeamioShell only; on this interface they are origin_refused.
+            NativeRecoveryShellAction.jsInterfaceRefusal(json)?.let { refused ->
+                runOnUiThread { dispatchAndroidBridgeJsonToWeb(JSONObject().put("action", "chatModuleEvent").put("event", refused)) }
+                return
+            }
             // Gate order (2026-11-17): pwaWalletSync and nativeMnemonicPreread enter the trust gate before the top-level origin check,
             // so an untrusted page gets untrusted_source (contract §十一), never origin_refused. Other commands keep the check below.
             PageSyncRoute.normalize(json)?.let { pageSync ->
@@ -1903,6 +1913,7 @@ class MainActivity : ComponentActivity() {
                 val r = bridge.dismissIncomingSystemCall(c.arg)
                 return if (r == "ok") ack.put("ok", true) else ack.put("ok", false).put("error", r)
             }
+            "shellCapabilities" -> return ack.put("ok", true).put("result", NativeRecoveryShellAction.capabilities())
             "startNativeVoiceMic" -> return ack.put("ok", true).put("result", bridge.startNativeVoiceMic())
             "stopNativeVoiceMic" -> bridge.stopNativeVoiceMic()
             else -> return ack.put("ok", false).put("error", "unknown_command")
@@ -1924,6 +1935,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleChatCommand(json: String, channel: WalletCredentialGate.Channel, deliver: (JSONObject) -> Unit) {
+        // r3si item 63 (2) (CN-02): window.BeamioShell-only names (account create, recovery) are origin_refused on the chat channels.
+        NativeRecoveryShellAction.jsInterfaceRefusal(json)?.let { refused -> deliver(chatEvent(refused)); return }
         // E1/E3 (v3.3.1) and the iOS review: a page-sync request, flat or nested, passes the trust gate before anything else.
         PageSyncRoute.normalize(json)?.let { pageSync ->
             handlePageSyncCommand(pageSync, channel, deliver)
@@ -2135,23 +2148,114 @@ class MainActivity : ComponentActivity() {
         qaEvalReceiver = QaWriteGuard.installNativeHooks(this) { if (::webView.isInitialized) webView else null }
     }
 
-    /** QA: the SDK's NativeAccountCreateHost.launcher opens the native account create page through this. */
+    /**
+     * The SDK's NativeAccountCreateHost.launcher (spec r3si item 63 (3) step 1): headless. It starts the SDK create on a background thread
+     * and returns true; nothing is shown. The SDK sends `nativeAccountCreateResult` to the page itself.
+     */
     private val nativeAccountCreateOpener: () -> Boolean = {
         if (isFinishing || isDestroyed) false
-        else {
-            runOnUiThread { startActivity(Intent(this, NativeAccountCreateActivity::class.java)) }
+        else runCatching {
+            screenGuardExecutor.execute { NativeAccountCreateBackends.current.confirm { applyOnboardingScreenGuard() } }
             true
-        }
+        }.getOrDefault(false)
     }
 
-    /** QA: the SDK's NativeRecoveryHost.launcher opens the native recovery page through this. */
-    private val nativeRecoveryOpener: () -> Boolean = { openNativeRecoveryPage() }
+    /**
+     * The SDK's NativeRecoveryHost.launcher (spec r3sc R3): opens a headless recovery session, never a page. The page then submits on
+     * window.BeamioShell (`nativeRecoverySubmit`, [answerRecoveryAction]).
+     */
+    private val nativeRecoveryOpener: () -> Boolean = { !isFinishing && !isDestroyed && NativeRecoveryHeadless.open() }
 
-    /** QA: shows the native recovery page. Called from the JS bridge thread. */
-    private fun openNativeRecoveryPage(): Boolean {
-        if (isFinishing || isDestroyed) return false
-        runOnUiThread { startActivity(Intent(this, NativeRecoveryActivity::class.java)) }
-        return true
+    /**
+     * `nativeRecoverySubmit` / `nativeRecoveryCancel` on window.BeamioShell (off the main thread). The channel has already checked
+     * the trusted origin and the main frame; ShellCredentialTrust adds the verified single ZIP. The log holds the action and the
+     * answer code only, never an argument.
+     */
+    private fun answerRecoveryAction(call: BeamioShellChannel.Decision.Call): JSONObject {
+        val ack = NativeRecoveryShellAction.answer(call.action, call.reqId, call.args, trusted = {
+            ShellCredentialTrust.verdict(
+                WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame = true, sourceOrigin = ChatOriginGate.TRUSTED, requireCapability = false,
+            ) == WalletCredentialGate.Verdict.TRUSTED
+        })
+        Log.i(CREDENTIAL_TAG, "${call.action} reqId=${call.reqId} ok=${ack.optBoolean("ok")} error=${ack.optString("error").ifEmpty { "none" }}")
+        return ack
+    }
+
+    private fun shellTrusted(): Boolean = ShellCredentialTrust.verdict(
+        WalletCredentialGate.Channel.WEB_MESSAGE, isMainFrame = true, sourceOrigin = ChatOriginGate.TRUSTED, requireCapability = false,
+    ) == WalletCredentialGate.Verdict.TRUSTED
+
+    /**
+     * `accountCreateRegister` on window.BeamioShell (r3si item 63 (3) step 2). The SDK's answer for this reqId comes back only in the
+     * BeamioShell reply (it carries the recovery code); every other SDK payload on the same delivery goes to the page as usual. The log holds
+     * the action, the reqId and the answer code only.
+     */
+    private fun answerAccountRegister(call: BeamioShellChannel.Decision.Call): JSONObject {
+        val ack = ShellAccountCreateAction.register(call.reqId, call.args, trusted = { shellTrusted() }) { body ->
+            val latch = java.util.concurrent.CountDownLatch(1)
+            val answer = java.util.concurrent.atomic.AtomicReference<JSONObject?>(null)
+            val rid = body.opt("reqId")
+            val pageDeliver = sdkDeliver { payload -> runOnUiThread { dispatchAndroidBridgeJsonToWeb(payload) } }
+            BeamioConetChatModule.handleCommand(applicationContext, body) { payload ->
+                val event = payload.optJSONObject("event") ?: payload
+                if (event.optString("type") == "ack" && event.opt("reqId")?.toString() == rid?.toString() && answer.compareAndSet(null, event)) {
+                    latch.countDown()
+                } else {
+                    pageDeliver(payload)
+                }
+            }
+            latch.await(ShellAccountCreateAction.SDK_ANSWER_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            answer.get()
+        }
+        Log.i(CREDENTIAL_TAG, "${call.action} reqId=${call.reqId} ok=${ack.optBoolean("ok")} error=${ack.optString("error").ifEmpty { "none" }}")
+        return ack
+    }
+
+    /** r3si item 63 (4)(d): the page's request for screen protection while the recovery code is shown. */
+    @Volatile private var secureScreenRequested = false
+    private val secureScreenTimeout = Runnable { secureScreenRequested = false; applyOnboardingScreenGuard() }
+
+    private fun answerSecureScreen(call: BeamioShellChannel.Decision.Call): JSONObject {
+        val ack = ShellAccountCreateAction.secureScreen(call.reqId, call.args, trusted = { shellTrusted() }) { on ->
+            // CP-22: a repeated on:true keeps the timer of the first on; only off stops it and only off-to-on starts it.
+            when (ShellAccountCreateAction.secureTimerFor(secureScreenRequested, on)) {
+                ShellAccountCreateAction.SecureTimer.START -> {
+                    mainHandler.removeCallbacks(secureScreenTimeout)
+                    mainHandler.postDelayed(secureScreenTimeout, ShellAccountCreateAction.SECURE_SCREEN_MAX_MS)
+                }
+                ShellAccountCreateAction.SecureTimer.KEEP -> Unit
+                ShellAccountCreateAction.SecureTimer.STOP -> mainHandler.removeCallbacks(secureScreenTimeout)
+            }
+            secureScreenRequested = on
+            applyOnboardingScreenGuard()
+        }
+        Log.i(CREDENTIAL_TAG, "${call.action} reqId=${call.reqId} ok=${ack.optBoolean("ok")} error=${ack.optString("error").ifEmpty { "none" }}")
+        return ack
+    }
+
+    /** Off-main read of the native key state for [applyOnboardingScreenGuard]; one thread. */
+    private val screenGuardExecutor = Executors.newSingleThreadExecutor()
+
+    /**
+     * Spec r3sc R6 (plan E5): while the device has no native account (G0, onboarding and recovery on the PWA page), the window is
+     * FLAG_SECURE (no screenshots, blank recents thumbnail). With an account (vault or store) it is cleared, so a signed-in user can
+     * capture as before. Unknown never secures ([OnboardingScreenGuard]).
+     */
+    private fun applyOnboardingScreenGuard() {
+        runCatching {
+            screenGuardExecutor.execute {
+                val noKey = OnboardingScreenGuard.secure(
+                    vaultHasKey = runCatching { NativeKeyBackends.current.hasKey() }.getOrNull(),
+                    storeEntries = runCatching { OnboardingScreenGuard.storeEntries(noBackupFilesDir) }.getOrNull(),
+                    sessionReady = runCatching { NativeKeyBackends.current.sessionReady() }.getOrNull(),
+                )
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (noKey || secureScreenRequested) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+            }
+        }
     }
 
     private fun isWalletPackageInstalled(packageName: String): Boolean {
@@ -3527,6 +3631,8 @@ class MainActivity : ComponentActivity() {
         NativeKeySdkBinding.install(this)
         NativeKeyImportRoute.register(nativeKeyImportOpener)
         NativeRecoveryRoute.register(nativeRecoveryOpener)
+        NativeRecoveryHeadless.onOutcome = { applyOnboardingScreenGuard() }
+        applyOnboardingScreenGuard()
         if (QaWriteGuard.isActive) installQaWriteGuardNativeHooks()
         NativeAccountCreateRoute.register(nativeAccountCreateOpener)
         rootLayout = FrameLayout(this).apply {
@@ -3810,6 +3916,13 @@ class MainActivity : ComponentActivity() {
                 onSignResponse = { json -> deliverChatSignResponse(json) },
             )
             BeamioShellChannel.gateFor = { action -> ShellNoKeyGate.answer(action) }
+            BeamioShellChannel.offMainCall = { call ->
+                when (call.action) {
+                    ShellAccountCreateAction.REGISTER -> answerAccountRegister(call)
+                    ShellAccountCreateAction.SECURE_SCREEN -> answerSecureScreen(call)
+                    else -> answerRecoveryAction(call)
+                }
+            }
             BeamioShellChannel.attach(this) { call, gate -> handleShellCall(jsBridge, call, gate) }
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
@@ -3873,6 +3986,8 @@ class MainActivity : ComponentActivity() {
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                     embeddedTopOrigin = ChatOriginGate.originOf(url) // chat channel origin gate
+                    // a reload or navigation ends an open headless recovery session (the SDK sends cancelled to the old page once)
+                    NativeRecoveryHeadless.cancel()
                     injectWebBridgeScripts(view, "onPageStarted")
                 }
 
@@ -3987,6 +4102,9 @@ class MainActivity : ComponentActivity() {
             WebView.setWebContentsDebuggingEnabled(true)
         }
         return WebView(this).apply {
+            // Plan E6: no system autofill in the shell's own page WebViews (passwords, recovery codes and passcodes are never offered
+            // to or saved by an autofill service). The in-app browser for outside sites is created elsewhere and keeps autofill.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4035,7 +4153,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** r3se R4(e): an open headless recovery session ends after [NativeRecoveryShellAction.BACKGROUND_TIMEOUT_MS] in the background. */
+    private val recoveryBackgroundCancel = Runnable { NativeRecoveryHeadless.cancel() }
+
     override fun onStart() {
+        mainHandler.removeCallbacks(recoveryBackgroundCancel)
         super.onStart()
         uiVisible = true
     }
@@ -4137,6 +4259,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         uiResumed = true
+        applyOnboardingScreenGuard()
         releaseCallCoverWhenWebViewDraws()
         // Glass IncomingCallActivity is the only incoming UI; drop Samsung shade ghosts.
         // Skip while waking for an incoming call — raise-then-present races onResume
@@ -4337,6 +4460,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        if (NativeRecoveryHeadless.isOpen()) mainHandler.postDelayed(recoveryBackgroundCancel, NativeRecoveryShellAction.BACKGROUND_TIMEOUT_MS)
         uiVisible = false
         showCallCoverSnapshot()
         dispatchAndroidBridgeJsonToWeb(
@@ -4361,6 +4485,11 @@ class MainActivity : ComponentActivity() {
         nativeVoiceMic = null
         NativeKeyImportRoute.unregister(nativeKeyImportOpener)
         NativeRecoveryRoute.unregister(nativeRecoveryOpener)
+        NativeRecoveryHeadless.onOutcome = null
+        mainHandler.removeCallbacks(recoveryBackgroundCancel)
+        mainHandler.removeCallbacks(secureScreenTimeout)
+        NativeRecoveryHeadless.cancel()
+        screenGuardExecutor.shutdownNow()
         qaEvalReceiver?.let { runCatching { unregisterReceiver(it) } }
         qaEvalReceiver = null
         NativeAccountCreateRoute.unregister(nativeAccountCreateOpener)

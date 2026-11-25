@@ -1,18 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Chat keys stay on this device: the wallet key, the PGP key store and its fallback file.
      The PWA bundle directory is rebuilt from the embedded ZIP and is never backed up or transferred
-     (it can exceed the backup quota and would bring back a stale bundle and completion record). -->
+     (it can exceed the backup quota and would bring back a stale bundle and completion record).
+     The WebView data (app_webview/: the page's IndexedDB, localStorage and caches) is not backed up or transferred either (192, plan E6):
+     the page's wallet copy and preferences stay on this device; a new device restores the wallet on the onboarding recovery page.
+     The native vault directory (files/native_wallet_v1/) and the account PGP store (beamio_sdk_account_pgp_k_v1.xml) are wrapped by
+     Android Keystore keys, which never leave the device: a restored copy could not be opened there, so they are not backed up or
+     transferred either (192). The local chat history (files/conet-chat) is keyed from the account key itself and still travels. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="beamio_chat_wallet_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_plain_v1.xml" />
         <exclude domain="file" path="silentpass_pwa/" />
+        <exclude domain="root" path="app_webview/" />
+        <exclude domain="file" path="native_wallet_v1/" />
+        <exclude domain="sharedpref" path="beamio_sdk_account_pgp_k_v1.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="beamio_chat_wallet_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_v1.xml" />
         <exclude domain="sharedpref" path="beamio_chat_pgp_plain_v1.xml" />
         <exclude domain="file" path="silentpass_pwa/" />
+        <exclude domain="root" path="app_webview/" />
+        <exclude domain="file" path="native_wallet_v1/" />
+        <exclude domain="sharedpref" path="beamio_sdk_account_pgp_k_v1.xml" />
     </device-transfer>
 </data-extraction-rules>

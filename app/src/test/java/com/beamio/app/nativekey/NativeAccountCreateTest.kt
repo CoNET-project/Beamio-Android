@@ -55,26 +55,26 @@ class NativeAccountCreateTest {
     }
 
     /**
-     * The SDK binding registers the create page as NativeAccountCreateHost.launcher (its own route, never import or
-     * recovery), confirms through NativeAccountCreate.confirm and closes through pageClosed. The page has no input
-     * field, is FLAG_SECURE, does not log, and does not build result events itself (the SDK sends them).
+     * 193 (r3si item 63): the SDK binding still registers NativeAccountCreateHost.launcher (its own route, never import or recovery) and
+     * confirms through NativeAccountCreate.confirm; the shell's opener is headless (no activity, no manifest entry, no native_create_ strings).
      */
     @Test
-    fun createPageIsItsOwnSecureRouteAndTheSdkSendsTheResult() {
+    fun createRouteIsHeadlessAndTheSdkSendsTheResult() {
         val binding = File("src/nativekeySdk/java/com/beamio/app/nativekey/NativeKeySdkBinding.kt").readText()
         assertTrue(binding.contains("NativeAccountCreateHost.launcher = { NativeAccountCreateRoute.open() }"))
         assertTrue(binding.contains("NativeAccountCreate.confirm(app)"))
-        assertTrue(binding.contains("NativeAccountCreateHost.pageClosed()"))
         assertFalse(binding.contains("NativeAccountCreateHost.report("))
         assertFalse(Regex("NativeAccountCreateHost\\.launcher[^\\n]*(Import|Recovery)").containsMatchIn(binding))
-        val page = File("src/main/java/com/beamio/app/nativekey/NativeAccountCreateActivity.kt").readText()
-        assertTrue(page.contains("FLAG_SECURE"))
-        assertTrue(page.contains("pageClosed()"))
-        assertFalse(page.contains("EditText"))
-        assertFalse(page.contains("Log."))
-        assertFalse(page.contains("nativeAccountCreateResult") || page.contains("evaluateJavascript"))
+        assertFalse(File("src/main/java/com/beamio/app/nativekey/NativeAccountCreateActivity.kt").exists())
+        assertFalse(File("src/main/AndroidManifest.xml").readText().contains("NativeAccountCreateActivity"))
+        for (res in listOf("src/main/res/values/strings.xml", "src/main/res/values-zh/strings.xml")) {
+            assertFalse(res, File(res).readText().contains("native_create_"))
+        }
         val main = File("src/main/java/com/beamio/app/MainActivity.kt").readText()
         assertTrue(main.contains("NativeAccountCreateRoute.register(nativeAccountCreateOpener)"))
         assertTrue(main.contains("NativeAccountCreateRoute.unregister(nativeAccountCreateOpener)"))
+        val opener = main.substring(main.indexOf("private val nativeAccountCreateOpener")).take(500)
+        assertTrue(opener.contains("NativeAccountCreateBackends.current.confirm"))
+        assertFalse(opener.contains("startActivity"))
     }
 }

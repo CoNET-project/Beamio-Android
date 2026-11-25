@@ -317,11 +317,11 @@ class EmbeddedPwaSelectionTest {
         assertEquals(originalUpdate.toString(), JSONObject(File(root, "staging/update.json").readText()).toString())
     }
 
-    // 12 the embedded content digest is the same full value on iOS (BeamioPWABuild.json treeDigest of 0.53.48)
+    // 12 the embedded content digest is the same full value on iOS (BeamioPWABuild.json treeDigest of 0.53.51)
     @Test
     fun embeddedContentDigestEqualsIosTreeDigestFullLength() {
-        assertEquals("c4805a90ae4bbec1ea5f6f3db5cf1674023819fe77fed165287fe54b094f2f19", BuildConfig.PWA_ZIP_SHA256)
-        assertEquals("13080eef9cec6068692696a8bd70ff10d19c1cfd9aa815f7c421f24748604974", BuildConfig.PWA_CONTENT_SHA256)
+        assertEquals("24dad62301c15a7c1c2a4ff33b5d0005f44b3c056c0bc2ded58954721466e355", BuildConfig.PWA_ZIP_SHA256)
+        assertEquals("de5b76235dba56b40d8156bf8bd89b0ad83210430fbde54baaeb50b143894123", BuildConfig.PWA_CONTENT_SHA256)
     }
 
     // 13 store builds never touch OTA: signed objects and staging are ignored, record network is n/a

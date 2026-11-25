@@ -242,8 +242,8 @@ android {
         applicationId = if (qaReleaseVariant) "com.beamio.app.t168r" else "com.beamio.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = 191
-        versionName = "1.0.173"
+        versionCode = 193
+        versionName = "1.0.175"
 
         // t168r (AH.6 item 3): a plain framework Instrumentation, since the minified release app lacks androidx.tracing.
         testInstrumentationRunner = if (qaReleaseVariant) "com.beamio.app.ah6.Ah6BridgeInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"

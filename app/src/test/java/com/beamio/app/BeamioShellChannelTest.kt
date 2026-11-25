@@ -55,9 +55,9 @@ class BeamioShellChannelTest {
             "clearOfflineChatAlerts", "notifyBackgroundChat", "debugLog", "chatModuleAvailable", "chatModuleIsRunning",
         )
         assertEquals(kept, annotated)
-        assertEquals(25, BeamioShellChannel.ACTIONS.size) // +queryIncomingCallOutcome, +notifyVoiceMicReady, -scanRecoveryQr;
+        assertEquals(30, BeamioShellChannel.ACTIONS.size) // +queryIncomingCallOutcome, +notifyVoiceMicReady, -scanRecoveryQr;
         // +nativeIdentityCheck, +uiLockState (qa.8 public entries), +incomingCallUnlockShown (A3),
-        // +dismissIncomingSystemCall (v46 §52)
+        // +dismissIncomingSystemCall (v46 §52), +nativeRecoverySubmit, +nativeRecoveryCancel, +shellCapabilities (192, r3sc R4/R5), +accountCreateRegister, +secureScreen (193, r3si item 63)
         for (name in BeamioShellChannel.ACTIONS.keys + listOf("chatModuleCommand", "chatModuleSignResponse")) {
             assertFalse("$name must not be on the base bridge", name in annotated)
         }
@@ -66,7 +66,8 @@ class BeamioShellChannelTest {
         val reexposed = Regex("@JavascriptInterface override fun (\\w+)").findAll(legacy).map { it.groupValues[1] }.toSet()
         // Legacy-bridge invariant, amended 2026-11-23 (minimum exposure): the legacy bridge re-exposes every ACTION
         // except the new identity / unlock commands below, which never go out over the sensitive legacy bridge.
-        val legacyExcluded = setOf("nativeIdentityCheck", "uiLockState", "incomingCallUnlockShown")
+        // 192 (r3sc R4): the recovery actions and the capability query never go out over the legacy bridge either.
+        val legacyExcluded = setOf("nativeIdentityCheck", "uiLockState", "incomingCallUnlockShown", "nativeRecoverySubmit", "nativeRecoveryCancel", "shellCapabilities", "accountCreateRegister", "secureScreen")
         assertTrue(BeamioShellChannel.ACTIONS.keys.containsAll(legacyExcluded))
         assertEquals(BeamioShellChannel.ACTIONS.keys - legacyExcluded + setOf("chatModuleCommand", "chatModuleSignResponse"), reexposed)
         // The excluded commands have no entry at all on the legacy subclass (nor on the base bridge, checked above).
@@ -85,6 +86,12 @@ class BeamioShellChannelTest {
         val urlCheck = body.indexOf("UrlSecretCheck.ruleFor(url)")
         val firstCall = body.indexOf("bridge.openURL(")
         assertTrue(gate in 0 until urlCheck); assertTrue(urlCheck < firstCall)
-        for (name in BeamioShellChannel.ACTIONS.keys) assertTrue("dispatch $name", body.contains("\"$name\" ->"))
+        for (name in BeamioShellChannel.ACTIONS.keys - BeamioShellChannel.OFF_MAIN) assertTrue("dispatch $name", body.contains("\"$name\" ->"))
+        // r3sc R4: the recovery actions are answered off the main thread by offMainCall only, never by handleShellCall.
+        for (name in BeamioShellChannel.OFF_MAIN) assertFalse("main dispatch $name", body.contains("\"$name\" ->"))
+        val offMain = src.substring(src.indexOf("BeamioShellChannel.offMainCall = { call ->")).take(400)
+        assertTrue(offMain.contains("ShellAccountCreateAction.REGISTER -> answerAccountRegister(call)"))
+        assertTrue(offMain.contains("ShellAccountCreateAction.SECURE_SCREEN -> answerSecureScreen(call)"))
+        assertTrue(offMain.contains("else -> answerRecoveryAction(call)"))
     }
 }

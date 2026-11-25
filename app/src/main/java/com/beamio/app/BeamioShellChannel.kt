@@ -43,6 +43,11 @@ object BeamioShellChannel {
         REQUEST_ID,
         /** The old method took nothing. */
         NONE,
+        /**
+         * Secret-carrying args (spec r3sc R4, `nativeRecoverySubmit`): never turned into text here; the handler reads the fields
+         * from [Decision.Call.args] and drops the object at once. [Decision.Call.arg] is empty.
+         */
+        SECRET,
     }
 
     val ACTIONS: Map<String, Arg> = linkedMapOf(
@@ -77,7 +82,28 @@ object BeamioShellChannel {
         // microphone
         "startNativeVoiceMic" to Arg.NONE,
         "stopNativeVoiceMic" to Arg.NONE,
+        // onboarding recovery from the PWA page (spec r3sc R4/R5): headless engine session, capability query
+        "nativeRecoverySubmit" to Arg.SECRET,
+        "nativeRecoveryCancel" to Arg.NONE,
+        "shellCapabilities" to Arg.NONE,
+        // onboarding account create from the PWA page (spec r3si/r3sj item 63): trusted registration, screen protection
+        "accountCreateRegister" to Arg.SECRET,
+        "secureScreen" to Arg.SECRET,
     )
+
+    /**
+     * Actions answered off the main thread by [offMainCall] (spec r3sc R4): the trust check hashes the active bundle and the engine
+     * call is long. They skip the no-key gate (recovery runs exactly when there is no key). Not registered on any JavascriptInterface.
+     */
+    val OFF_MAIN: Set<String> = setOf("nativeRecoverySubmit", "nativeRecoveryCancel", "accountCreateRegister", "secureScreen")
+
+    /** Handler of [OFF_MAIN] actions, run on [recoveryExecutor]; returns the ack. Set by MainActivity. */
+    @Volatile
+    var offMainCall: ((Decision.Call) -> JSONObject)? = null
+
+    private val recoveryExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "beamio-shell-recovery").apply { isDaemon = true } }
+    }
 
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
@@ -97,7 +123,13 @@ object BeamioShellChannel {
             val post: (JSONObject) -> Unit = { o -> main.post { runCatching { reply.postMessage(o.toString()) } } }
             when (val d = decide(data, sourceOrigin.toString(), isMainFrame)) {
                 is Decision.Answer -> post(d.ack)
-                is Decision.Call -> {
+                is Decision.Call -> if (d.action in OFF_MAIN) {
+                    recoveryExecutor.execute {
+                        val ack = runCatching { offMainCall?.invoke(d) ?: ack(d.action, d.reqId).put("ok", false).put("error", "unknown_command") }
+                            .getOrElse { ack(d.action, d.reqId).put("ok", false).put("error", "internal_error") }
+                        post(ack)
+                    }
+                } else {
                     // ANR fix (S25 176, 2026-11-17): the no-key gate reads the SDK vault (keystore). It is computed off the main thread;
                     // the call itself still runs on main, with the gate result passed in. A failed read stays internal_error.
                     gateExecutor.execute {
@@ -143,7 +175,7 @@ object BeamioShellChannel {
             Arg.JSON -> args.toString()
             Arg.URL -> (args.opt("url") as? String)?.takeIf { it.isNotEmpty() } ?: return refuse(action, reqId, "bad_args")
             Arg.REQUEST_ID -> (args.opt("requestId") as? String) ?: ""
-            Arg.NONE -> ""
+            Arg.NONE, Arg.SECRET -> ""
         }
         return Decision.Call(action, reqId, kind, arg, args)
     }

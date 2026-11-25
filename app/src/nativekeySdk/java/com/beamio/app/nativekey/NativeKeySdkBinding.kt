@@ -71,8 +71,15 @@ object NativeKeySdkBinding {
         }
 
         override fun recover(recoveryCode: CharArray): RecoveryOutcome {
-            val bytes = ByteArray(recoveryCode.size)
-            for (i in recoveryCode.indices) bytes[i] = recoveryCode[i].code.toByte() // [0-9A-Za-z] only (checked before)
+            // UTF-8 of the typed text (the page may send any characters within the byte limit; the engine checks the format).
+            // An unpaired surrogate becomes U+FFFD. Both the encoder buffer and the copy are wiped.
+            val buf = java.nio.charset.StandardCharsets.UTF_8.newEncoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+                .replaceWith(byteArrayOf(0xEF.toByte(), 0xBF.toByte(), 0xBD.toByte()))
+                .encode(java.nio.CharBuffer.wrap(recoveryCode))
+            val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
+            if (buf.hasArray()) buf.array().fill(0)
             return try {
                 await { cb -> NativeRecovery.restoreWithRecoveryCode(app, bytes, cb) }
             } finally {
